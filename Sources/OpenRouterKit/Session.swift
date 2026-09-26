@@ -2,7 +2,10 @@
 // (`openrouter --resume <id>`) or by whatever drives it. One JSON file per
 // session under ~/.openrouter/sessions/, rewritten as the conversation
 // grows: the messages without the system prompt, the folder it ran in,
-// the model, and when.
+// the model, and when. Beside it, <id>.jsonl: the same messages as a log
+// that is only ever appended to — a line per message, each with an id of
+// its own, written as the message lands — which a host can follow as the
+// conversation happens, as it follows Claude Code's and Codex's logs.
 
 import Foundation
 
@@ -63,6 +66,41 @@ public struct ORSessionStore: Sendable {
 
     public func remove(id: String) throws {
         try FileManager.default.removeItem(at: url(for: id))
+        try? FileManager.default.removeItem(at: logURL(for: id))
+    }
+
+    /// The session's log: a line per message, appended to only.
+    public func logURL(for id: String) -> URL { directory.appendingPathComponent(id + ".jsonl") }
+
+    /// How many messages the log holds.
+    public func loggedCount(id: String) -> Int {
+        guard let data = try? Data(contentsOf: logURL(for: id)) else { return 0 }
+        return data.split(separator: 0x0A).filter { !$0.isEmpty }.count
+    }
+
+    /// Adds messages to the end of the log: each a line of its own,
+    /// `{"id", "timestamp", "message"}`.
+    public func appendLog(id: String, _ messages: [ORMessage]) throws {
+        guard !messages.isEmpty else { return }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        var data = Data()
+        for message in messages {
+            let line = ORLogLine(id: UUID().uuidString.lowercased(), timestamp: stamp, message: message)
+            data.append(try encoder.encode(line))
+            data.append(0x0A)
+        }
+        let url = logURL(for: id)
+        if !FileManager.default.fileExists(atPath: url.path) {
+            try data.write(to: url)
+            return
+        }
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: data)
     }
 
     /// Every session, newest first; only those run in `cwd` when given.
@@ -77,4 +115,11 @@ public struct ORSessionStore: Sendable {
         }
         return sessions.sorted { $0.updated > $1.updated }
     }
+}
+
+/// One line of a session's log.
+public struct ORLogLine: Codable, Sendable, Equatable {
+    public var id: String
+    public var timestamp: String
+    public var message: ORMessage
 }

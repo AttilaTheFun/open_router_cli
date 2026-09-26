@@ -29,6 +29,22 @@ private func scratch() -> URL {
     #expect(!store.exists(id: newer.id))
 }
 
+@Test func theLogIsOnlyAppendedTo() throws {
+    let store = ORSessionStore(directory: scratch().appendingPathComponent("sessions"))
+    let id = ORSession.newID()
+    #expect(store.loggedCount(id: id) == 0)
+    try store.appendLog(id: id, [ORMessage(role: .user, content: "Add a README")])
+    let call = ORToolCall(id: "c1", type: "function", function: .init(name: "bash", arguments: "{\"command\":\"ls\"}"))
+    try store.appendLog(id: id, [ORMessage(role: .assistant, toolCalls: [call]), ORMessage(role: .tool, content: "README.md", toolCallID: "c1")])
+    #expect(store.loggedCount(id: id) == 3)
+    // A line per message, in order, each with an id of its own.
+    let lines = try String(contentsOf: store.logURL(for: id), encoding: .utf8).split(separator: "\n")
+    let decoded = try lines.map { try JSONDecoder().decode(ORLogLine.self, from: Data($0.utf8)) }
+    #expect(decoded.map(\.message.role) == [.user, .assistant, .tool])
+    #expect(Set(decoded.map(\.id)).count == 3)
+    #expect(decoded[1].message.toolCalls?.first?.function.name == "bash")
+}
+
 // MARK: Config
 
 @Test func keyComesFromTheEnvironmentFirst() {
