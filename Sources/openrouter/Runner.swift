@@ -12,6 +12,8 @@ final class Conversation: @unchecked Sendable {
     let cwd: String
     private(set) var agent: ORAgent
     private var client: OpenRouterClient
+    /// How many of the conversation's messages the log already has.
+    private var logged: Int
 
     static let systemPrompt = """
         You are openrouter, a coding agent working in the folder %CWD% on the user's computer. \
@@ -39,6 +41,7 @@ final class Conversation: @unchecked Sendable {
                         systemPrompt: Self.systemPrompt.replacingOccurrences(of: "%CWD%", with: root),
                         reasoningEffort: Self.effort(effort))
         agent.load(session.messages)
+        logged = store.loggedCount(id: session.id)
     }
 
     var model: String { session.model }
@@ -78,7 +81,11 @@ final class Conversation: @unchecked Sendable {
     func run(_ text: String, sink: @escaping @Sendable (ORAgentEvent) -> Void) async throws {
         refreshKey()
         defer { save() }
-        for try await event in agent.send(text) {
+        let turn = agent.send(text)
+        // The user's message is in the conversation from here: on disk at
+        // once, so a host following the log shows it as it is sent.
+        save()
+        for try await event in turn {
             sink(event)
             if case .assistant = event { save() }
             if case .toolResult = event { save() }
@@ -88,6 +95,12 @@ final class Conversation: @unchecked Sendable {
     func save() {
         session.messages = agent.history
         try? store.save(session)
+        // The log takes what it does not have yet; a session from before
+        // the log gets its whole history the first time.
+        let history = agent.history
+        if history.count > logged, (try? store.appendLog(id: session.id, Array(history[logged...]))) != nil {
+            logged = history.count
+        }
     }
 }
 
