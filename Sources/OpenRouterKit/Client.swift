@@ -38,7 +38,9 @@ public struct OpenRouterClient: Sendable {
     private func authorized(_ url: URL, method: String) -> URLRequest {
         var request = URLRequest(url: url)
         request.httpMethod = method
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        // Without a key, no header: the model list is public, and only a
+        // chat needs one.
+        if !apiKey.isEmpty { request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
         request.setValue(referer, forHTTPHeaderField: "HTTP-Referer")
         request.setValue(title, forHTTPHeaderField: "X-Title")
         return request

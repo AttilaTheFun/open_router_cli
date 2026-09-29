@@ -14,8 +14,12 @@ final class MockTransport: ORTransport, @unchecked Sendable {
     var sentBodies: [Data] = []
     private let lock = NSLock()
 
+    /// The Authorization header of the last plain request, if it had one.
+    var lastAuthorization: String?
+
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        (dataBody, HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!)
+        lock.withLock { lastAuthorization = request.value(forHTTPHeaderField: "Authorization") }
+        return (dataBody, HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!)
     }
 
     func lines(for request: URLRequest) async throws -> (AsyncThrowingStream<String, Error>, HTTPURLResponse) {
@@ -134,4 +138,18 @@ struct EchoTool: ORTool {
         let object = (try? JSONSerialization.jsonObject(with: Data(arguments.utf8))) as? [String: Any]
         return object?["text"] as? String ?? ""
     }
+}
+
+
+/// OpenRouter's model list is public: fetched without a key, no
+/// Authorization is sent; with one, it is.
+@Test func modelsWithoutAKey() async throws {
+    let transport = MockTransport()
+    transport.dataBody = Data(#"{"data":[{"id":"b/two","name":"B: Two"},{"id":"a/one","name":"A: One"}]}"#.utf8)
+    let keyless = OpenRouterClient(apiKey: "", transport: transport)
+    let list = try await keyless.models()
+    #expect(list.map(\.id) == ["a/one", "b/two"])
+    #expect(transport.lastAuthorization == nil)
+    _ = try await OpenRouterClient(apiKey: "sk-test", transport: transport).models()
+    #expect(transport.lastAuthorization == "Bearer sk-test")
 }

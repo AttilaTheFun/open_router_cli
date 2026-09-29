@@ -114,8 +114,9 @@ func auth(_ subcommand: String?, _ rest: [String]) async -> Int32 {
 }
 
 func models() async -> Int32 {
+    // OpenRouter's model list is public: no login needed to see or keep it
+    // (a host shows it before a key is set; running a model needs one).
     let client = OpenRouterClient()
-    guard client.hasKey else { Output.error("Not logged in. Run `openrouter auth login` or set OPENROUTER_API_KEY."); return 1 }
     do {
         // The list is kept on disk for hosts to read; asked for, it is
         // fetched afresh and kept again.
