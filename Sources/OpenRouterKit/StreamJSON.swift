@@ -4,13 +4,14 @@
 // `claude` this way drives `openrouter` the same, unchanged.
 //
 // Out (stdout):
-//   {"type":"system","subtype":"init","session_id":…,"model":…,"cwd":…}
-//   {"type":"stream_event","event":{"type":"message_start","message":{"id":…}}}
-//   {"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":…}}}
+//   {"type":"system","subtype":"init","session_id":…,"model":…,"cwd":…,"tools":[…],"permissionMode":"bypassPermissions","mcp_servers":[]}
+//   {"type":"stream_event","event":{"type":"message_start","message":{"id":…}}}                                  (with --include-partial-messages)
+//   {"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":…}}}        (the same)
 //   {"type":"assistant","message":{"id":…,"model":…,"usage":{…},"content":[{"type":"text",…},{"type":"tool_use",…}]}}
 //   {"type":"user","uuid":…,"message":{"content":[{"type":"tool_result","tool_use_id":…,"content":…}]}}
 //   {"type":"result","subtype":"success","is_error":false,"result":…}
 //   {"type":"result","subtype":"error_during_execution","is_error":true,"result":…}   (a failed or interrupted turn)
+//   {"type":"result","subtype":"error_max_turns","is_error":true,"result":…}          (a turn out of rounds)
 // An assistant message has one id: `message_start` and `assistant` carry
 // it, and so does the message's line in the session log. A tool call has
 // one id: the `tool_use` block's, which its `tool_result` names in
@@ -26,8 +27,12 @@ import Foundation
 public enum StreamJSON {
     // MARK: Out
 
+    /// The first line. `permissionMode` and `mcp_servers` are what is in
+    /// effect, whatever the command line asked for: the agent's tools run
+    /// without asking, and it connects to no MCP server.
     public static func systemInit(sessionID: String, model: String, cwd: String, tools: [String]) -> String {
-        line(["type": "system", "subtype": "init", "session_id": sessionID, "model": model, "cwd": cwd, "tools": tools])
+        line(["type": "system", "subtype": "init", "session_id": sessionID, "model": model, "cwd": cwd, "tools": tools,
+              "permissionMode": "bypassPermissions", "mcp_servers": [String]()])
     }
 
     public static func messageStart(id: String) -> String {
@@ -59,8 +64,18 @@ public enum StreamJSON {
         return line(["type": "user", "uuid": UUID().uuidString.lowercased(), "message": ["role": "user", "content": [block]]])
     }
 
-    public static func result(isError: Bool, text: String, sessionID: String) -> String {
-        line(["type": "result", "subtype": isError ? "error_during_execution" : "success", "is_error": isError, "result": text, "session_id": sessionID])
+    /// How a turn ended: the `subtype` of its result line, as Claude Code
+    /// names them.
+    public enum ResultKind: String, Sendable {
+        case success
+        /// The turn failed, or was interrupted.
+        case errorDuringExecution = "error_during_execution"
+        /// The turn used all its rounds of tool calls.
+        case errorMaxTurns = "error_max_turns"
+    }
+
+    public static func result(_ kind: ResultKind, text: String, sessionID: String) -> String {
+        line(["type": "result", "subtype": kind.rawValue, "is_error": kind != .success, "result": text, "session_id": sessionID])
     }
 
     public static func controlResponse(requestID: String) -> String {

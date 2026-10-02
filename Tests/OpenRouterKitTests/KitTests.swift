@@ -151,7 +151,7 @@ import TestSupport
     #expect(block["tool_use_id"] as? String == "call_1")
     #expect(block["content"] as? String == "a\nb")
 
-    let done = StreamJSON.result(isError: false, text: "ok", sessionID: "s")
+    let done = StreamJSON.result(.success, text: "ok", sessionID: "s")
     let doneRoot = try #require(try JSONSerialization.jsonObject(with: Data(done.utf8)) as? [String: Any])
     #expect(doneRoot["is_error"] as? Bool == false)
     #expect(doneRoot["session_id"] as? String == "s")

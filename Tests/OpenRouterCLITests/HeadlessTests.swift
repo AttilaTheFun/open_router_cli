@@ -19,14 +19,15 @@ private struct Rig {
     private let out = Pipe()
     private let err = Pipe()
 
-    init(streams: [[String]], status: Int = 200, key: String = "k", streamOut: Bool = true) throws {
+    init(streams: [[String]], status: Int = 200, key: String = "k", streamOut: Bool = true, partialMessages: Bool = true,
+         maxRounds: Int? = nil) throws {
         let mock = MockTransport(streams: streams, status: status)
         self.mock = mock
         cwd = try scratch()
         store = ORSessionStore(directory: try scratch().appendingPathComponent("sessions"))
-        conversation = try Conversation(resume: nil, sessionID: nil, cwd: cwd.path, model: "m", effort: nil, store: store,
+        conversation = try Conversation(resume: nil, sessionID: nil, cwd: cwd.path, model: "m", effort: nil, maxRounds: maxRounds, store: store,
                                         makeClient: { OpenRouterClient(apiKey: key, transport: mock) })
-        runner = HeadlessRunner(conversation: conversation, streamOut: streamOut,
+        runner = HeadlessRunner(conversation: conversation, streamOut: streamOut, partialMessages: partialMessages,
                                 output: Output(out: out.fileHandleForWriting, err: err.fileHandleForWriting))
     }
 
@@ -271,7 +272,8 @@ private func logLines(_ rig: Rig) throws -> [ORLogLine] {
     let out = Pipe()
     let resumed = try Conversation(resume: first.conversation.id, sessionID: nil, cwd: first.cwd.path, model: nil, effort: nil,
                                    store: first.store, makeClient: { OpenRouterClient(apiKey: "k", transport: mock) })
-    let runner = HeadlessRunner(conversation: resumed, streamOut: true, output: Output(out: out.fileHandleForWriting, err: .nullDevice))
+    let runner = HeadlessRunner(conversation: resumed, streamOut: true, partialMessages: true,
+                                output: Output(out: out.fileHandleForWriting, err: .nullDevice))
     #expect(await runner.turn("second"))
     try out.fileHandleForWriting.close()
     let ids = streamedIDs(try objects(String(decoding: try out.fileHandleForReading.readToEnd() ?? Data(), as: UTF8.self)))
@@ -281,4 +283,49 @@ private func logLines(_ rig: Rig) throws -> [ORLogLine] {
     #expect(after.map(\.message.content) == ["first", "one", "second", "two"])
     #expect(ids.finished.count == 1)
     #expect(after[3].id == ids.finished.first)
+}
+
+/// Without `--include-partial-messages` the finished messages are printed
+/// and the text as it is written is not, as Claude Code does.
+@Test(.timeLimit(.minutes(1))) func withoutPartialMessagesOnlyWholeMessagesArePrinted() async throws {
+    let rig = try Rig(streams: [
+        [try sse(["choices": [["delta": ["content": "Hel"]]]]), try sse(["choices": [["delta": ["content": "lo"]]]]),
+         try sse(["choices": [["delta": [String: Any](), "finish_reason": "stop"]]]), "data: [DONE]"],
+    ], partialMessages: false)
+    #expect(await rig.runner.turn("hi"))
+    let lines = try objects(try rig.written().out)
+    #expect(lines.map { $0["type"] as? String } == ["assistant", "result"])
+    let content = try #require((lines[0]["message"] as? [String: Any])?["content"] as? [[String: Any]])
+    #expect(content.first?["text"] as? String == "Hello")
+    // The message still has the id its log line has.
+    #expect((lines[0]["message"] as? [String: Any])?["id"] as? String == (try logLines(rig))[1].id)
+}
+
+/// `--max-turns`: the turn stops after that many rounds of tool calls,
+/// with the result Claude Code gives for it.
+@Test(.timeLimit(.minutes(1))) func aTurnOutOfRoundsEndsWithErrorMaxTurns() async throws {
+    let again = try toolCalls([("call_1", "list_directory", [:])])
+    let rig = try Rig(streams: [again, again, again], maxRounds: 2)
+    #expect(await rig.runner.turn("go") == false)
+    let lines = try objects(try rig.written().out)
+    let result = try #require(lines.last)
+    #expect(result["type"] as? String == "result")
+    #expect(result["subtype"] as? String == "error_max_turns")
+    #expect(result["is_error"] as? Bool == true)
+    #expect(result["result"] as? String == "The turn was stopped after 2 rounds of tool calls without a final answer.")
+    #expect(await rig.mock.sentBodies.count == 2)
+}
+
+/// The first line says what is in effect: one permission mode, no MCP.
+@Test func theInitLineSaysWhatIsInEffect() throws {
+    let line = StreamJSON.systemInit(sessionID: "s", model: "m", cwd: "/tmp", tools: ["bash"])
+    let root = try #require(try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+    #expect(root["type"] as? String == "system")
+    #expect(root["subtype"] as? String == "init")
+    #expect(root["session_id"] as? String == "s")
+    #expect(root["model"] as? String == "m")
+    #expect(root["cwd"] as? String == "/tmp")
+    #expect(root["tools"] as? [String] == ["bash"])
+    #expect(root["permissionMode"] as? String == "bypassPermissions")
+    #expect((root["mcp_servers"] as? [Any])?.isEmpty == true)
 }
