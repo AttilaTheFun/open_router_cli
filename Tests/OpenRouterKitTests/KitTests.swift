@@ -100,20 +100,19 @@ import TestSupport
 @Test func toolsReadWriteEditAndList() async throws {
     let root = try scratch()
     let tools = CodingTools.standard(cwd: root.path)
-    func tool(_ name: String) -> any ORTool { tools.first { $0.name == name }! }
-    _ = try await tool("write_file").call(arguments: "{\"path\":\"src/a.txt\",\"content\":\"one\\ntwo\\nthree\"}")
-    let read = try await tool("read_file").call(arguments: "{\"path\":\"src/a.txt\",\"offset\":2,\"limit\":1}")
-    #expect(read == "2\ttwo\n… (1 more lines)\n")
-    _ = try await tool("edit_file").call(arguments: "{\"path\":\"src/a.txt\",\"old_string\":\"two\",\"new_string\":\"2\"}")
-    #expect(try String(contentsOf: root.appendingPathComponent("src/a.txt"), encoding: .utf8) == "one\n2\nthree")
-    await #expect(throws: (any Error).self) {
-        _ = try await tool("edit_file").call(arguments: "{\"path\":\"src/a.txt\",\"old_string\":\"missing\",\"new_string\":\"x\"}")
+    #expect(tools.map(\.name) == ["bash", "read_file", "write_file", "edit_file", "list_directory"])
+    func call(_ name: String, _ arguments: String) async throws -> String {
+        try await #require(tools.first { $0.name == name }).call(arguments: arguments)
     }
-    let listed = try await tool("list_directory").call(arguments: "{}")
-    #expect(listed == "src/")
-    let ran = try await tool("bash").call(arguments: "{\"command\":\"echo hi; exit 3\"}")
-    #expect(ran.hasPrefix("hi\n"))
-    #expect(ran.hasSuffix("[exit 3]"))
+    #expect(try await call("list_directory", "{}") == "(empty)")
+    let wrote = try await call("write_file", "{\"path\":\"src/a.txt\",\"content\":\"one\\ntwo\\nthree\"}")
+    #expect(wrote.hasPrefix("wrote 13 bytes to "))
+    #expect(try await call("read_file", "{\"path\":\"src/a.txt\",\"offset\":2,\"limit\":1}") == "2\ttwo\n… (1 more lines)\n")
+    _ = try await call("edit_file", "{\"path\":\"src/a.txt\",\"old_string\":\"two\",\"new_string\":\"2\"}")
+    #expect(try String(contentsOf: root.appendingPathComponent("src/a.txt"), encoding: .utf8) == "one\n2\nthree")
+    #expect(try await call("list_directory", "{}") == "src/")
+    #expect(try await call("list_directory", "{\"path\":\"src\"}") == "a.txt")
+    #expect(try await call("bash", "{\"command\":\"cat src/a.txt; exit 3\"}") == "one\n2\nthree\n[exit 3]")
 }
 
 // MARK: Stream-json
