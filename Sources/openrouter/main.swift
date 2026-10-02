@@ -52,9 +52,10 @@ struct Options {
 }
 
 let options = Options(Array(CommandLine.arguments.dropFirst()))
+let output = Output.standard
 
 func usage() {
-    Output.line("""
+    output.line("""
         openrouter \(version) — a coding agent on OpenRouter's models
           openrouter [--model M] [--effort E] [--resume ID] [--cwd DIR]   chat in this folder
           openrouter resume ID                                            carry a session on
@@ -69,13 +70,13 @@ func usage() {
 }
 
 func readSecret(prompt: String) -> String {
-    Output.text(prompt)
+    output.text(prompt)
     var term = termios()
     tcgetattr(STDIN_FILENO, &term)
     var quiet = term
     quiet.c_lflag &= ~UInt(ECHO)
     tcsetattr(STDIN_FILENO, TCSANOW, &quiet)
-    defer { tcsetattr(STDIN_FILENO, TCSANOW, &term); Output.text("\n") }
+    defer { tcsetattr(STDIN_FILENO, TCSANOW, &term); output.text("\n") }
     return readLine() ?? ""
 }
 
@@ -85,30 +86,30 @@ func auth(_ subcommand: String?, _ rest: [String]) async -> Int32 {
         var key = rest.first ?? options.values["key"] ?? ""
         if key.isEmpty { key = readSecret(prompt: "OpenRouter API key (https://openrouter.ai/keys): ") }
         key = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard key.hasPrefix("sk-or-") else { Output.error("That does not look like an OpenRouter key (they start with sk-or-)."); return 1 }
+        guard key.hasPrefix("sk-or-") else { output.error("That does not look like an OpenRouter key (they start with sk-or-)."); return 1 }
         let client = OpenRouterClient(apiKey: key)
-        do { _ = try await client.models() } catch { Output.error("OpenRouter rejected the key: \(error.localizedDescription)"); return 1 }
+        do { _ = try await client.models() } catch { output.error("OpenRouter rejected the key: \(error.localizedDescription)"); return 1 }
         var config = ORConfig.load()
         config.apiKey = key
-        do { try config.save() } catch { Output.error("Could not save \(ORConfig.file.path): \(error.localizedDescription)"); return 1 }
-        Output.line("Saved to \(ORConfig.file.path)")
+        do { try config.save() } catch { output.error("Could not save \(ORConfig.file.path): \(error.localizedDescription)"); return 1 }
+        output.line("Saved to \(ORConfig.file.path)")
         return 0
     case "logout":
         var config = ORConfig.load()
         config.apiKey = nil
-        do { try config.save() } catch { Output.error("Could not save \(ORConfig.file.path): \(error.localizedDescription)"); return 1 }
-        Output.line("Key removed from \(ORConfig.file.path)")
+        do { try config.save() } catch { output.error("Could not save \(ORConfig.file.path): \(error.localizedDescription)"); return 1 }
+        output.line("Key removed from \(ORConfig.file.path)")
         return 0
     case "status", nil:
         if let source = ORConfig.keySource() {
-            Output.line("Logged in: key from \(source)")
-            Output.line("Model: \(ORConfig.model(requested: nil))")
+            output.line("Logged in: key from \(source)")
+            output.line("Model: \(ORConfig.model(requested: nil))")
             return 0
         }
-        Output.line("Not logged in. Run `openrouter auth login` or set OPENROUTER_API_KEY.")
+        output.line("Not logged in. Run `openrouter auth login` or set OPENROUTER_API_KEY.")
         return 1
     default:
-        Output.error("openrouter auth status | login [KEY] | logout")
+        output.error("openrouter auth status | login [KEY] | logout")
         return 2
     }
 }
@@ -121,21 +122,21 @@ func models() async -> Int32 {
         // The list is kept on disk for hosts to read; asked for, it is
         // fetched afresh and kept again.
         var list = try await ORModelCache.refresh(client: client)
-        if options.flags.contains("refresh") { Output.line("Kept \(list.count) models in \(ORModelCache.file.path)"); return 0 }
+        if options.flags.contains("refresh") { output.line("Kept \(list.count) models in \(ORModelCache.file.path)"); return 0 }
         if options.flags.contains("free") { list = list.filter { $0.id.hasSuffix(":free") } }
         if options.flags.contains("tools") { list = list.filter { $0.supportsTools } }
         if options.flags.contains("json") {
             let data = try JSONEncoder().encode(list)
-            Output.line(String(decoding: data, as: UTF8.self))
+            output.line(String(decoding: data, as: UTF8.self))
         } else {
             for model in list {
                 let price = model.pricePerMillion.map { model.isFree ? "  free" : String(format: "  $%.2f/$%.2f per M", $0.input, $0.output) } ?? ""
-                Output.line(model.id + (model.contextLength.map { "  (\($0) ctx)" } ?? "") + (model.supportsTools ? "  tools" : "") + price)
+                output.line(model.id + (model.contextLength.map { "  (\($0) ctx)" } ?? "") + (model.supportsTools ? "  tools" : "") + price)
             }
         }
         return 0
     } catch {
-        Output.error("\(error.localizedDescription)")
+        output.error("\(error.localizedDescription)")
         return 1
     }
 }
@@ -145,14 +146,14 @@ func sessions() -> Int32 {
     if options.flags.contains("json") {
         struct Row: Encodable { let id: String; let cwd: String; let model: String; let title: String; let updated: Double }
         let rows = list.map { Row(id: $0.id, cwd: $0.cwd, model: $0.model, title: $0.title, updated: $0.updated) }
-        if let data = try? JSONEncoder().encode(rows) { Output.line(String(decoding: data, as: UTF8.self)) }
+        if let data = try? JSONEncoder().encode(rows) { output.line(String(decoding: data, as: UTF8.self)) }
         return 0
     }
     for session in list {
         let when = Date(timeIntervalSince1970: session.updated).formatted(date: .abbreviated, time: .shortened)
-        Output.line("\(session.id)  \(when)  \(session.cwd)  \(session.title)")
+        output.line("\(session.id)  \(when)  \(session.cwd)  \(session.title)")
     }
-    if list.isEmpty { Output.line("No sessions yet.") }
+    if list.isEmpty { output.line("No sessions yet.") }
     return 0
 }
 
@@ -167,16 +168,16 @@ func headless() async -> Int32 {
                                         model: options.values["model"], effort: options.values["effort"])
     } catch {
         let message = "Could not open the session: \(error.localizedDescription)"
-        if streamOut { Output.line(StreamJSON.result(isError: true, text: message, sessionID: options.values["resume"] ?? "")) } else { Output.error(message) }
+        if streamOut { output.line(StreamJSON.result(isError: true, text: message, sessionID: options.values["resume"] ?? "")) } else { output.error(message) }
         return 1
     }
     if streamOut {
-        Output.line(StreamJSON.systemInit(sessionID: conversation.session.id, model: conversation.model, cwd: conversation.cwd,
+        output.line(StreamJSON.systemInit(sessionID: conversation.id, model: await conversation.model, cwd: conversation.cwd,
                                           tools: CodingTools.standard(cwd: conversation.cwd).map(\.name)))
     }
     // A host reads the model list from disk; keep it no older than a day.
-    if ORModelCache.isStale, conversation.hasKey { Task.detached { _ = try? await ORModelCache.refresh() } }
-    let runner = HeadlessRunner(conversation: conversation, streamOut: streamOut)
+    if ORModelCache.isStale, await conversation.hasKey { Task.detached { _ = try? await ORModelCache.refresh() } }
+    let runner = HeadlessRunner(conversation: conversation, streamOut: streamOut, output: output)
     if streamIn {
         do {
             for try await line in FileHandle.standardInput.bytes.lines {
@@ -185,11 +186,11 @@ func headless() async -> Int32 {
                 case .user(let text): await runner.enqueue(text)
                 case .interrupt(let requestID):
                     await runner.interrupt()
-                    if streamOut { Output.line(StreamJSON.controlResponse(requestID: requestID)) }
+                    if streamOut { output.line(StreamJSON.controlResponse(requestID: requestID)) }
                 }
             }
         } catch {
-            Output.error("stdin: \(error.localizedDescription)")
+            output.error("stdin: \(error.localizedDescription)")
         }
         await runner.drain()
         return 0
@@ -198,7 +199,7 @@ func headless() async -> Int32 {
     if prompt.isEmpty, let data = try? FileHandle.standardInput.readToEnd() {
         prompt = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
     }
-    guard !prompt.isEmpty else { Output.error("Nothing to say: give a prompt, or pipe one in."); return 2 }
+    guard !prompt.isEmpty else { output.error("Nothing to say: give a prompt, or pipe one in."); return 2 }
     await runner.enqueue(prompt)
     await runner.drain()
     return 0
@@ -212,50 +213,49 @@ func chat(resume: String?) async -> Int32 {
                                         cwd: options.values["cwd"] ?? FileManager.default.currentDirectoryPath,
                                         model: options.values["model"], effort: options.values["effort"])
     } catch {
-        Output.error("Could not open the session: \(error.localizedDescription)")
+        output.error("Could not open the session: \(error.localizedDescription)")
         return 1
     }
-    guard conversation.hasKey else {
-        Output.error("Not logged in. Run `openrouter auth login` or set OPENROUTER_API_KEY.")
+    guard await conversation.hasKey else {
+        output.error("Not logged in. Run `openrouter auth login` or set OPENROUTER_API_KEY.")
         return 1
     }
-    Output.line("openrouter \(version) · \(conversation.model) · \(conversation.cwd)")
-    Output.line("session \(conversation.session.id) · /model <id> to switch · Ctrl-D to quit")
+    output.line("openrouter \(version) · \(await conversation.model) · \(conversation.cwd)")
+    output.line("session \(conversation.id) · /model <id> to switch · Ctrl-D to quit")
     while true {
-        Output.text("\n\u{203A} ")
-        guard let entered = readLine() else { Output.text("\n"); break }
+        output.text("\n\u{203A} ")
+        guard let entered = readLine() else { output.text("\n"); break }
         let text = entered.trimmingCharacters(in: .whitespaces)
         guard !text.isEmpty else { continue }
         if text.hasPrefix("/model ") {
-            conversation.setModel(String(text.dropFirst(7)).trimmingCharacters(in: .whitespaces))
-            conversation.save()
-            Output.line("model: \(conversation.model)")
+            await conversation.setModel(String(text.dropFirst(7)).trimmingCharacters(in: .whitespaces))
+            output.line("model: \(await conversation.model)")
             continue
         }
         if text == "/quit" || text == "/exit" { break }
         do {
             try await conversation.run(text) { event in
                 switch event {
-                case .delta(let piece): Output.text(piece)
+                case .delta(let piece): output.text(piece)
                 case .toolCall(let name, let arguments, _):
                     let object = (try? JSONSerialization.jsonObject(with: Data(arguments.utf8))) as? [String: Any]
                     let summary = (object?["command"] ?? object?["path"]) as? String ?? ""
-                    Output.text("\n[\(name)] \(summary)\n")
-                case .toolResult(_, let output, _):
-                    let first = output.split(separator: "\n").prefix(3).joined(separator: "\n")
-                    Output.text("  \(first.replacingOccurrences(of: "\n", with: "\n  "))\n")
-                case .done: Output.text("\n")
-                case .message, .assistant, .usage: break
+                    output.text("\n[\(name)] \(summary)\n")
+                case .toolResult(_, let result, _):
+                    let first = result.split(separator: "\n").prefix(3).joined(separator: "\n")
+                    output.text("  \(first.replacingOccurrences(of: "\n", with: "\n  "))\n")
+                case .started, .message, .assistant, .usage: break
                 }
             }
+            output.text("\n")
         } catch {
-            Output.error("\n\(error.localizedDescription)")
+            output.error("\n\(error.localizedDescription)")
         }
     }
     return 0
 }
 
-if options.flags.contains("version") || options.command == "version" { Output.line(version); exit(0) }
+if options.flags.contains("version") || options.command == "version" { output.line(version); exit(0) }
 if options.flags.contains("help") || options.flags.contains("h") || options.command == "help" { usage(); exit(0) }
 
 let status: Int32

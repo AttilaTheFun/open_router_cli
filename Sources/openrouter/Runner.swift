@@ -4,13 +4,17 @@
 
 import Foundation
 import OpenRouterKit
+import Synchronization
 
-/// A session's agent and its file, resumed or new.
-final class Conversation: @unchecked Sendable {
-    let store = ORSessionStore()
-    private(set) var session: ORSession
-    let cwd: String
-    private(set) var agent: ORAgent
+/// A session's agent and its file, resumed or new. An actor: the session
+/// is its state, written by the turn in flight and by whoever changes the
+/// model.
+actor Conversation {
+    private let store: ORSessionStore
+    private var session: ORSession
+    nonisolated let id: String
+    nonisolated let cwd: String
+    private let agent: ORAgent
     private var client: OpenRouterClient
     /// How many of the conversation's messages the log already has.
     private var logged: Int
@@ -28,7 +32,8 @@ final class Conversation: @unchecked Sendable {
     ///   - sessionID: the id a new session should have (a host that names them).
     init(resume: String?, sessionID: String?, cwd: String, model requested: String?, effort: String?) throws {
         let root = (cwd as NSString).expandingTildeInPath
-        self.cwd = root
+        let store = ORSessionStore()
+        let session: ORSession
         if let resume, !resume.isEmpty {
             var kept = try store.load(id: resume)
             if let requested, !requested.isEmpty { kept.model = requested }
@@ -36,11 +41,15 @@ final class Conversation: @unchecked Sendable {
         } else {
             session = ORSession(id: sessionID ?? ORSession.newID(), cwd: root, model: ORConfig.model(requested: requested))
         }
-        client = OpenRouterClient()
+        let client = OpenRouterClient()
+        self.store = store
+        self.session = session
+        self.client = client
+        id = session.id
+        self.cwd = root
         agent = ORAgent(client: client, model: session.model, tools: CodingTools.standard(cwd: root),
                         systemPrompt: Self.systemPrompt.replacingOccurrences(of: "%CWD%", with: root),
-                        reasoningEffort: Self.effort(effort))
-        agent.load(session.messages)
+                        history: session.messages, reasoningEffort: Self.effort(effort))
         logged = store.loggedCount(id: session.id)
     }
 
@@ -57,108 +66,127 @@ final class Conversation: @unchecked Sendable {
         }
     }
 
-    func setModel(_ model: String) {
+    /// The model from the next turn on, kept in the session file.
+    func setModel(_ model: String) async {
         session.model = model
-        agent.model = model
+        await agent.setModel(model)
+        await save()
     }
 
     /// The key is read afresh for each turn, so a key set after launch
     /// (in the config file) is picked up without a restart.
-    func refreshKey() {
+    private func refreshKey() async {
         let fresh = OpenRouterClient()
         guard fresh.apiKey != client.apiKey else { return }
         client = fresh
-        let rebuilt = ORAgent(client: fresh, model: agent.model, tools: CodingTools.standard(cwd: cwd),
-                              systemPrompt: Self.systemPrompt.replacingOccurrences(of: "%CWD%", with: cwd),
-                              reasoningEffort: agent.reasoningEffort)
-        rebuilt.load(agent.history)
-        agent = rebuilt
+        await agent.setClient(fresh)
     }
 
     /// Runs one user turn, handing each event on, and keeps the session
-    /// file current as messages land. Throws what the API threw; the
-    /// conversation so far is saved either way.
-    func run(_ text: String, sink: @escaping @Sendable (ORAgentEvent) -> Void) async throws {
-        refreshKey()
-        defer { save() }
-        let turn = agent.send(text)
-        // The user's message is in the conversation from here: on disk at
-        // once, so a host following the log shows it as it is sent.
-        save()
-        for try await event in turn {
-            sink(event)
-            if case .assistant = event { save() }
-            if case .toolResult = event { save() }
+    /// file current as messages land: the user's message at once, so a
+    /// host following the log shows it as it is sent. Throws what the API
+    /// threw; the conversation so far is saved either way.
+    func run(_ text: String, sink: @Sendable (ORAgentEvent) async -> Void) async throws {
+        await refreshKey()
+        do {
+            try await agent.send(text) { event in
+                await sink(event)
+                switch event {
+                case .started, .assistant, .toolResult: await self.save()
+                case .delta, .toolCall, .message, .usage: break
+                }
+            }
+        } catch {
+            await save()
+            throw error
         }
+        await save()
     }
 
-    func save() {
-        session.messages = agent.history
+    private func save() async {
+        let history = await agent.history
+        session.messages = history
         try? store.save(session)
         // The log takes what it does not have yet; a session from before
         // the log gets its whole history the first time.
-        let history = agent.history
         if history.count > logged, (try? store.appendLog(id: session.id, Array(history[logged...]))) != nil {
             logged = history.count
         }
     }
 }
 
-/// Where lines go: stdout, one at a time, flushed. Every turn's events and
-/// the terminal's text pass through here so they never interleave.
-enum Output {
-    private static let lock = NSLock()
+/// Where the CLI writes: stdout, a line or a piece of text at a time, and
+/// stderr. Each write is whole under its lock, so a turn's events and the
+/// answers to control requests never interleave.
+final class Output: Sendable {
+    static let standard = Output(out: .standardOutput, err: .standardError)
 
-    static func line(_ text: String) {
-        lock.lock(); defer { lock.unlock() }
-        FileHandle.standardOutput.write(Data((text + "\n").utf8))
+    private let out: Mutex<FileHandle>
+    private let err: Mutex<FileHandle>
+
+    init(out: FileHandle, err: FileHandle) {
+        self.out = Mutex(out)
+        self.err = Mutex(err)
     }
 
-    static func text(_ text: String) {
-        lock.lock(); defer { lock.unlock() }
-        FileHandle.standardOutput.write(Data(text.utf8))
-    }
+    func line(_ text: String) { Self.write(text + "\n", to: out) }
 
-    static func error(_ text: String) {
-        FileHandle.standardError.write(Data((text + "\n").utf8))
+    func text(_ text: String) { Self.write(text, to: out) }
+
+    func error(_ text: String) { Self.write(text + "\n", to: err) }
+
+    private static func write(_ text: String, to handle: borrowing Mutex<FileHandle>) {
+        // A write that fails has nowhere to be reported: whoever was
+        // reading has gone.
+        handle.withLock { try? $0.write(contentsOf: Data(text.utf8)) }
     }
 }
 
 /// A turn's events as stream-json lines: the ids, the message boundaries,
 /// the usage that goes on the finished message.
-final class StreamJSONTurn: @unchecked Sendable {
+actor StreamJSONTurn {
     private let model: String
+    private let output: Output
     private var counter = 0
     private var messageID = ""
     private var started = false
     private var usage: (prompt: Int, completion: Int)?
+    /// The text of the last assistant message: what the result carries.
     private(set) var lastText = ""
-    private let lock = NSLock()
 
-    init(model: String) { self.model = model }
+    init(model: String, output: Output) {
+        self.model = model
+        self.output = output
+    }
 
     private func nextID() -> String {
         counter += 1
         return "msg_or_" + String(UUID().uuidString.prefix(8)).lowercased() + "_\(counter)"
     }
 
+    private func startMessage() {
+        guard !started else { return }
+        messageID = nextID()
+        started = true
+        output.line(StreamJSON.messageStart(id: messageID))
+    }
+
     func handle(_ event: ORAgentEvent) {
-        lock.lock(); defer { lock.unlock() }
         switch event {
         case .delta(let text):
-            if !started { messageID = nextID(); started = true; Output.line(StreamJSON.messageStart(id: messageID)) }
-            Output.line(StreamJSON.textDelta(text))
+            startMessage()
+            output.line(StreamJSON.textDelta(text))
         case .usage(let prompt, let completion):
             usage = (prompt, completion)
         case .assistant(let message):
-            if !started { messageID = nextID(); started = true; Output.line(StreamJSON.messageStart(id: messageID)) }
-            Output.line(StreamJSON.assistant(id: messageID, model: model, message: message, usage: usage))
+            startMessage()
+            output.line(StreamJSON.assistant(id: messageID, model: model, message: message, usage: usage))
             if let text = message.content, !text.isEmpty { lastText = text }
             started = false
             usage = nil
-        case .toolResult(_, let output, let id):
-            Output.line(StreamJSON.toolResult(callID: id, output: output, isError: output.hasPrefix("Error:")))
-        case .message, .toolCall, .done:
+        case .toolResult(_, let result, let id):
+            output.line(StreamJSON.toolResult(callID: id, output: result, isError: result.hasPrefix("Error:")))
+        case .started, .message, .toolCall:
             break
         }
     }
@@ -170,12 +198,14 @@ final class StreamJSONTurn: @unchecked Sendable {
 actor HeadlessRunner {
     private let conversation: Conversation
     private let streamOut: Bool
+    private let output: Output
     private var queue: [String] = []
     private var current: Task<Void, Never>?
 
-    init(conversation: Conversation, streamOut: Bool) {
+    init(conversation: Conversation, streamOut: Bool, output: Output) {
         self.conversation = conversation
         self.streamOut = streamOut
+        self.output = output
     }
 
     func enqueue(_ text: String) {
@@ -190,15 +220,11 @@ actor HeadlessRunner {
     private func pump() {
         guard current == nil, !queue.isEmpty else { return }
         let text = queue.removeFirst()
-        current = Task { [conversation, streamOut] in
-            await Self.turn(text, conversation: conversation, streamOut: streamOut)
-            self.finished()
+        current = Task {
+            await turn(text)
+            current = nil
+            pump()
         }
-    }
-
-    private func finished() {
-        current = nil
-        pump()
     }
 
     /// Waits for everything queued to run.
@@ -208,28 +234,28 @@ actor HeadlessRunner {
         }
     }
 
-    static func turn(_ text: String, conversation: Conversation, streamOut: Bool) async {
-        let id = conversation.session.id
-        guard conversation.hasKey || ORConfig.resolvedKey() != nil else {
+    private func turn(_ text: String) async {
+        let id = conversation.id
+        guard await conversation.hasKey || ORConfig.resolvedKey() != nil else {
             let message = "No OpenRouter API key. Run `openrouter auth login <key>` on this computer (keys: https://openrouter.ai/keys), or set OPENROUTER_API_KEY."
-            if streamOut { Output.line(StreamJSON.result(isError: true, text: message, sessionID: id)) } else { Output.error(message) }
+            if streamOut { output.line(StreamJSON.result(isError: true, text: message, sessionID: id)) } else { output.error(message) }
             return
         }
-        let turn = StreamJSONTurn(model: conversation.model)
+        let lines = StreamJSONTurn(model: await conversation.model, output: output)
         do {
-            try await conversation.run(text) { event in
+            try await conversation.run(text) { [streamOut, output] event in
                 if streamOut {
-                    turn.handle(event)
+                    await lines.handle(event)
                 } else if case .delta(let piece) = event {
-                    Output.text(piece)
+                    output.text(piece)
                 }
             }
-            if streamOut { Output.line(StreamJSON.result(isError: false, text: turn.lastText, sessionID: id)) } else { Output.text("\n") }
+            if streamOut { output.line(StreamJSON.result(isError: false, text: await lines.lastText, sessionID: id)) } else { output.text("\n") }
         } catch is CancellationError {
-            if streamOut { Output.line(StreamJSON.result(isError: true, text: "Interrupted", sessionID: id)) }
+            if streamOut { output.line(StreamJSON.result(isError: true, text: "Interrupted", sessionID: id)) }
         } catch {
             let message = (error as? LocalizedError)?.errorDescription ?? "\(error)"
-            if streamOut { Output.line(StreamJSON.result(isError: true, text: message, sessionID: id)) } else { Output.error(message) }
+            if streamOut { output.line(StreamJSON.result(isError: true, text: message, sessionID: id)) } else { output.error(message) }
         }
     }
 }
