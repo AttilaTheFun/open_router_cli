@@ -44,7 +44,8 @@ the same command line. What each does here:
 
 | Option | Here |
 | --- | --- |
-| `-p`, `--input-format`, `--output-format`, `--model`, `--effort`, `--resume`, `--session-id` | As in Claude Code. |
+| `-p`, `--input-format`, `--output-format`, `--model`, `--effort`, `--resume` | As in Claude Code. |
+| `--session-id ID` | The id a new session gets. Refused when a session has that id already (that is `--resume`). |
 | `--include-partial-messages` | As in Claude Code: with stream-json output, the reply's text as it is written (`stream_event` lines). Without it only whole messages are printed. |
 | `--max-turns N` | The rounds of tool calls a turn may take (default 24); a turn that uses them all ends with an `error_max_turns` result. |
 | `--permission-mode`, `--permission-prompt-tool` | **Taken and not acted on.** openrouter has one mode: its tools run without asking, and nothing is ever sent to a permission prompt tool. The `init` line says `"permissionMode":"bypassPermissions"` whatever was asked, and a mode other than that is noted on stderr. A host's "ask first" setting does not hold for an openrouter session. |
@@ -73,11 +74,16 @@ message (`{"id", "timestamp", "message"}`), appended as the message
 lands, for a host to follow. An assistant message has one id, in the
 stream-json lines (`message_start`, `assistant`) and on its log line; a
 tool call has one id, on its `tool_use` block, its `tool_result`, and in
-the log's `tool_calls` and `tool_call_id`. Sessions are resumed by id (letters, digits, `-`, `_`
-and `.`; anything else is refused). Tools run without asking. The file
-tools reach only inside the session's folder, but bash runs whatever the
-model writes, as you: keep the agent in a folder you are happy for it to
-change, on a computer you are happy for it to use.
+the log's `tool_calls` and `tool_call_id`. Sessions are resumed by id (up
+to 128 letters, digits, `-`, `_` and `.`, starting with a letter or
+digit; anything else is refused), and a resumed session works in the
+folder it was working in unless `--cwd` names another. A turn whose
+session cannot be written to disk ends with an error that says so.
+
+Tools run without asking. The file tools reach only inside the session's
+folder, but bash runs whatever the model writes, as you: keep the agent in
+a folder you are happy for it to change, on a computer you are happy for
+it to use.
 
 ## Tests
 

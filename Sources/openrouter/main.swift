@@ -143,12 +143,12 @@ func headless() async -> Int32 {
     note(options)
     let conversation: Conversation
     do {
-        conversation = try Conversation(resume: options.values["resume"], sessionID: options.values["session-id"],
-                                        cwd: options.values["cwd"] ?? FileManager.default.currentDirectoryPath,
+        conversation = try Conversation(resume: options.values["resume"], sessionID: options.values["session-id"], cwd: options.values["cwd"],
                                         model: options.values["model"], effort: options.values["effort"], maxRounds: options.maxTurns)
     } catch {
         let message = "Could not open the session: \(error.localizedDescription)"
-        if streamOut { output.line(StreamJSON.result(.errorDuringExecution, text: message, sessionID: options.values["resume"] ?? "")) } else { output.error(message) }
+        let id = options.values["resume"] ?? options.values["session-id"] ?? ""
+        if streamOut { output.line(StreamJSON.result(.errorDuringExecution, text: message, sessionID: id)) } else { output.error(message) }
         return 1
     }
     if streamOut {
@@ -190,8 +190,7 @@ func chat(resume: String?) async -> Int32 {
     note(options)
     let conversation: Conversation
     do {
-        conversation = try Conversation(resume: resume, sessionID: options.values["session-id"],
-                                        cwd: options.values["cwd"] ?? FileManager.default.currentDirectoryPath,
+        conversation = try Conversation(resume: resume, sessionID: options.values["session-id"], cwd: options.values["cwd"],
                                         model: options.values["model"], effort: options.values["effort"], maxRounds: options.maxTurns)
     } catch {
         output.error("Could not open the session: \(error.localizedDescription)")
@@ -209,7 +208,11 @@ func chat(resume: String?) async -> Int32 {
         let text = entered.trimmingCharacters(in: .whitespaces)
         guard !text.isEmpty else { continue }
         if text.hasPrefix("/model ") {
-            await conversation.setModel(String(text.dropFirst(7)).trimmingCharacters(in: .whitespaces))
+            do {
+                try await conversation.setModel(String(text.dropFirst(7)).trimmingCharacters(in: .whitespaces))
+            } catch {
+                output.error(error.localizedDescription)
+            }
             output.line("model: \(await conversation.model)")
             continue
         }
@@ -244,7 +247,13 @@ switch options.command {
 case "auth": status = await auth(options.positional.first, Array(options.positional.dropFirst()))
 case "models": status = await models()
 case "sessions": status = sessions()
-case "resume": status = await chat(resume: options.positional.first)
+case "resume":
+    if let id = options.positional.first {
+        status = await chat(resume: id)
+    } else {
+        output.error("openrouter: resume needs a session id (openrouter sessions lists them)")
+        status = 2
+    }
 default: status = options.flags.contains("p") ? await headless() : await chat(resume: options.values["resume"])
 }
 exit(status)

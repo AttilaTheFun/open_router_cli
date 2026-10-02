@@ -183,19 +183,109 @@ private func toolResult(_ line: [String: Any]) throws -> [String: Any] {
     #expect(try rig.store.load(id: rig.conversation.id).messages.map(\.content) == ["one", "two", "As far as it got"])
 }
 
+/// A conversation over a store, that never reaches the network or the
+/// real configuration.
+private func conversation(resume: String? = nil, sessionID: String? = nil, cwd: String? = nil, model: String? = "m", store: ORSessionStore,
+                          streams: [[String]] = []) throws -> Conversation {
+    let mock = MockTransport(streams: streams)
+    return try Conversation(resume: resume, sessionID: sessionID, cwd: cwd, model: model, effort: nil, maxRounds: nil, store: store,
+                            makeClient: { OpenRouterClient(apiKey: "k", transport: mock) })
+}
+
 /// A session id from the command line that is not a file name is refused
 /// when the conversation is opened, whether to resume or to start.
 @Test func aSessionIdThatIsNotAFileNameIsRefused() throws {
     let base = try scratch()
     let store = ORSessionStore(directory: base.appendingPathComponent("sessions"))
-    #expect(throws: ORSessionError.invalidID("../../etc/passwd")) {
-        _ = try Conversation(resume: "../../etc/passwd", sessionID: nil, cwd: base.path, model: "m", effort: nil, store: store)
-    }
-    #expect(throws: ORSessionError.invalidID("../escape")) {
-        _ = try Conversation(resume: nil, sessionID: "../escape", cwd: base.path, model: "m", effort: nil, store: store)
-    }
-    let named = try Conversation(resume: nil, sessionID: "named-by-the-host", cwd: base.path, model: "m", effort: nil, store: store)
-    #expect(named.id == "named-by-the-host")
+    #expect(throws: ORSessionError.invalidID("../../etc/passwd")) { _ = try conversation(resume: "../../etc/passwd", store: store) }
+    #expect(throws: ORSessionError.invalidID("../escape")) { _ = try conversation(sessionID: "../escape", store: store) }
+    #expect(throws: ORSessionError.invalidID("")) { _ = try conversation(resume: "", store: store) }
+    #expect(try conversation(sessionID: "named-by-the-host", store: store).id == "named-by-the-host")
+}
+
+/// `--session-id` names a new session. Given the id of one that exists it
+/// is refused, and the session is left as it was — not replaced by an
+/// empty one.
+@Test(.timeLimit(.minutes(1))) func aNewSessionCannotTakeTheIdOfAnExistingOne() async throws {
+    let rig = try Rig(streams: [try reply("kept")])
+    #expect(await rig.runner.turn("remember this"))
+    let before = try Data(contentsOf: try rig.store.url(for: rig.conversation.id))
+    let error = #expect(throws: ORSessionError.self) { _ = try conversation(sessionID: rig.conversation.id, store: rig.store) }
+    #expect(error == .alreadyExists(rig.conversation.id))
+    #expect(error?.errorDescription == "There is already a session \(rig.conversation.id); carry it on with --resume \(rig.conversation.id).")
+    #expect(try Data(contentsOf: try rig.store.url(for: rig.conversation.id)) == before)
+    #expect(try rig.store.load(id: rig.conversation.id).messages.map(\.content) == ["remember this", "kept"])
+}
+
+/// A resumed session works in the folder it was working in, wherever it
+/// is resumed from, unless another is chosen, which it then keeps.
+@Test(.timeLimit(.minutes(1))) func aResumedSessionWorksInItsOwnFolder() async throws {
+    let rig = try Rig(streams: [try reply("one")])
+    #expect(await rig.runner.turn("first"))
+    let id = rig.conversation.id
+    // Not the process's current folder: the session's.
+    let resumed = try conversation(resume: id, store: rig.store)
+    #expect(resumed.cwd == rig.cwd.path)
+    #expect(resumed.cwd != FileManager.default.currentDirectoryPath)
+
+    let elsewhere = try scratch()
+    let moved = try conversation(resume: id, cwd: elsewhere.path, model: nil, store: rig.store, streams: [try reply("two")])
+    #expect(moved.cwd == elsewhere.path)
+    try await moved.run("second") { _ in }
+    let saved = try rig.store.load(id: id)
+    #expect(saved.cwd == elsewhere.path)
+    #expect(saved.model == "m")
+    #expect(saved.messages.map(\.content) == ["first", "one", "second", "two"])
+}
+
+/// The folder is kept as an absolute path, whatever was typed.
+@Test func aNewSessionsFolderIsAbsolute() throws {
+    let store = ORSessionStore(directory: try scratch().appendingPathComponent("sessions"))
+    let here = FileManager.default.currentDirectoryPath
+    #expect(try conversation(store: store).cwd == here)
+    #expect(try conversation(cwd: ".", store: store).cwd == here)
+    #expect(try conversation(cwd: "sub/../other", store: store).cwd == here + "/other")
+    #expect(try conversation(cwd: "~", store: store).cwd == NSHomeDirectory())
+    #expect(try conversation(cwd: "/tmp/somewhere", store: store).cwd == "/tmp/somewhere")
+}
+
+/// A turn whose session cannot be written says so: its result is an
+/// error, not a success with nothing on disk.
+@Test(.timeLimit(.minutes(1))) func aTurnThatCannotBeSavedFails() async throws {
+    // The sessions folder cannot be made: a file is where it would go.
+    let blocked = try scratch().appendingPathComponent("sessions")
+    try Data().write(to: blocked)
+    let mock = MockTransport(streams: [try reply("an answer")])
+    let unsaved = try Conversation(resume: nil, sessionID: nil, cwd: try scratch().path, model: "m", effort: nil, maxRounds: nil,
+                                   store: ORSessionStore(directory: blocked), makeClient: { OpenRouterClient(apiKey: "k", transport: mock) })
+    let out = Pipe()
+    let runner = HeadlessRunner(conversation: unsaved, streamOut: true, partialMessages: false,
+                                output: Output(out: out.fileHandleForWriting, err: .nullDevice))
+    #expect(await runner.turn("hi") == false)
+    try out.fileHandleForWriting.close()
+    let lines = try objects(String(decoding: try out.fileHandleForReading.readToEnd() ?? Data(), as: UTF8.self))
+    // The reply was printed, since the model did give it; then the failure.
+    #expect(lines.map { $0["type"] as? String } == ["assistant", "result"])
+    #expect(lines[1]["is_error"] as? Bool == true)
+    #expect(lines[1]["subtype"] as? String == "error_during_execution")
+    #expect((lines[1]["result"] as? String)?.hasPrefix("The session could not be saved, so what this turn added will be lost when openrouter exits: ") == true)
+}
+
+/// A log with more lines than the session has messages (left by a save
+/// that failed after its append) does not stop new messages being logged.
+@Test(.timeLimit(.minutes(1))) func aLogAheadOfItsSessionStillTakesNewMessages() async throws {
+    let rig = try Rig(streams: [try reply("one")])
+    #expect(await rig.runner.turn("first"))
+    let id = rig.conversation.id
+    try rig.store.appendLog(id: id, [ORMessage(role: .user, content: "lost"), ORMessage(role: .assistant, content: "lost too"),
+                                     ORMessage(role: .user, content: "and this")])
+    #expect(rig.store.loggedCount(id: id) == 5)
+    let resumed = try conversation(resume: id, store: rig.store, streams: [try reply("two")])
+    try await resumed.run("second") { _ in }
+    let logged = try String(contentsOf: try rig.store.logURL(for: id), encoding: .utf8)
+        .split(separator: "\n").map { try JSONDecoder().decode(ORLogLine.self, from: Data($0.utf8)).message.content }
+    #expect(logged == ["first", "one", "lost", "lost too", "and this", "second", "two"])
+    #expect(try rig.store.load(id: id).messages.map(\.content) == ["first", "one", "second", "two"])
 }
 
 /// The ids of the assistant messages a run printed: `message_start`'s and
@@ -270,7 +360,7 @@ private func logLines(_ rig: Rig) throws -> [ORLogLine] {
 
     let mock = MockTransport(streams: [try reply("two")])
     let out = Pipe()
-    let resumed = try Conversation(resume: first.conversation.id, sessionID: nil, cwd: first.cwd.path, model: nil, effort: nil,
+    let resumed = try Conversation(resume: first.conversation.id, sessionID: nil, cwd: nil, model: nil, effort: nil, maxRounds: nil,
                                    store: first.store, makeClient: { OpenRouterClient(apiKey: "k", transport: mock) })
     let runner = HeadlessRunner(conversation: resumed, streamOut: true, partialMessages: true,
                                 output: Output(out: out.fileHandleForWriting, err: .nullDevice))
