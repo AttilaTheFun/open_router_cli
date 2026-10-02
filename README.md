@@ -8,8 +8,9 @@ coding-agent CLI.
   tools, the coding tools (`CodingTools.standard(cwd:)`: bash, read_file,
   write_file, edit_file, list_directory), sessions on disk
   (`ORSessionStore`), the config (`ORConfig`), and Claude Code's
-  stream-json protocol (`StreamJSON`). Shared by Visor and the Universal
-  UI Playground through rules_swift_package_manager.
+  stream-json protocol (`StreamJSON`). A host can embed it as a Swift
+  package, without the CLI. macOS only: the bash tool runs a process, and
+  the config and the sessions live in the user's home folder.
 - **openrouter** — the CLI: a coding agent in the terminal, and a headless
   mode that speaks Claude Code's stream-json protocol, so anything that
   drives `claude -p` drives `openrouter -p` the same way.
