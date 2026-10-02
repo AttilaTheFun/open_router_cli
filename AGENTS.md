@@ -1,7 +1,9 @@
 # open_router_cli, for agents
 
 Read README.md for the parts: OpenRouterKit (the library) and `openrouter`
-(the CLI built on it). `swift build && swift test` builds and tests both.
+(the CLI built on it). Warnings are errors, as CI builds it:
+
+    swift build -Xswiftc -warnings-as-errors && swift test -Xswiftc -warnings-as-errors
 
 ## Changes
 
@@ -19,3 +21,6 @@ to one focused change, and say in it how the change was verified.
   pass keys in.
 - Never spend real API credit in tests: the tests run against a mock
   transport.
+- No warnings: CI passes `-warnings-as-errors` on the command line. The
+  flag stays out of Package.swift (no `unsafeFlags`), since hosts embed
+  the library.

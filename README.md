@@ -44,7 +44,10 @@ the agent in a folder you are happy for it to change.
 
 ## Tests
 
-    swift test
+    swift build -Xswiftc -warnings-as-errors && swift test -Xswiftc -warnings-as-errors
+
+Warnings are errors, as CI builds it. The tests run against a mock
+transport and spend no API credit.
 
 ## License
 

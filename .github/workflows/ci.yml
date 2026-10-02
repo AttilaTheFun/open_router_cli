@@ -9,5 +9,9 @@ jobs:
     runs-on: xcode-27
     steps:
       - uses: actions/checkout@v4
+      # Warnings are errors, here rather than in Package.swift: a host that
+      # embeds the library chooses its own flags.
+      - name: Build
+        run: swift build -Xswiftc -warnings-as-errors
       - name: Test
-        run: swift test
+        run: swift test -Xswiftc -warnings-as-errors
