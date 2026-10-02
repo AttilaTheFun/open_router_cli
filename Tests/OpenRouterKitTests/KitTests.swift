@@ -121,6 +121,14 @@ import TestSupport
     #expect(function["parameters"] as? NSDictionary == written)
 }
 
+/// A request is the same bytes each time it is made: its keys are in
+/// one order, whatever order a dictionary happens to give them in.
+@Test func theRequestBodyIsTheSameBytesEachTime() throws {
+    let request = ORChatRequest(model: "a/b", messages: [ORMessage(role: .user, content: "hi")], tools: [EchoTool()])
+    let body = String(decoding: try OpenRouterClient.body(request), as: UTF8.self)
+    #expect(body == #"{"messages":[{"content":"hi","role":"user"}],"model":"a/b","stream":true,"tools":[{"function":{"description":"Echo the text back.","name":"echo","parameters":{"properties":{"text":{"type":"string"}},"required":["text"],"type":"object"}},"type":"function"}]}"#)
+}
+
 @Test func requestCarriesReasoningEffort() throws {
     let body = try OpenRouterClient.body(ORChatRequest(model: "m", messages: [], reasoningEffort: "high"))
     let root = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
@@ -147,7 +155,9 @@ import TestSupport
     #expect(try String(contentsOf: root.appendingPathComponent("src/a.txt"), encoding: .utf8) == "one\n2\nthree")
     #expect(try await call("list_directory", "{}") == "src/")
     #expect(try await call("list_directory", "{\"path\":\"src\"}") == "a.txt")
-    #expect(try await call("bash", "{\"command\":\"cat src/a.txt; exit 3\"}") == "one\n2\nthree\n[exit 3]")
+    // The shell works in the same folder (what else it prints is the
+    // login shell's business; BashToolTests has the exact output).
+    #expect(try await call("bash", "{\"command\":\"cat src/a.txt; exit 3\"}").hasSuffix("one\n2\nthree\n[exit 3]"))
 }
 
 // MARK: Stream-json

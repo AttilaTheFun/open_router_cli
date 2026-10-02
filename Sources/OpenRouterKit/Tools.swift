@@ -25,6 +25,9 @@ public enum CodingTools {
     /// neither leads out. The path returned is that end, and is what the
     /// tool then opens.
     static func resolve(_ path: String, in cwd: String) throws -> String {
+        // A NUL ends a path for the system and not for Swift: what is
+        // checked here and what is then opened could differ.
+        guard !path.utf8.contains(0) else { throw ToolFailure(message: "a path cannot have a NUL character in it") }
         let expanded = (path as NSString).expandingTildeInPath
         let root = try canonical(components(URL(fileURLWithPath: cwd).path))
         let isAbsolute = expanded.utf8.first == UInt8(ascii: "/")
@@ -105,8 +108,14 @@ public struct BashTool: ORTool {
         {"type":"object","properties":{"command":{"type":"string","description":"The command to run with zsh -lc"},"timeout":{"type":"integer","description":"Seconds before the command is killed (default 120, at most 600)"}},"required":["command"]}
         """
     let cwd: String
+    let environment: [String: String]?
 
-    public init(cwd: String) { self.cwd = cwd }
+    /// - Parameter environment: the environment the command runs in;
+    ///   this process's own when nil.
+    public init(cwd: String, environment: [String: String]? = nil) {
+        self.cwd = cwd
+        self.environment = environment
+    }
 
     public func call(arguments: String) async throws -> String {
         let args = CodingTools.arguments(arguments)
@@ -114,7 +123,7 @@ public struct BashTool: ORTool {
         // Seconds; a model that sends milliseconds gets the cap.
         let timeout = min(600, max(1, (args["timeout"] as? Int) ?? 120))
         // Output past the limit is counted and dropped as it arrives.
-        let outcome = try await Shell.run(command, cwd: cwd, timeout: .seconds(timeout), keep: CodingTools.outputLimit)
+        let outcome = try await Shell.run(command, cwd: cwd, environment: environment, timeout: .seconds(timeout), keep: CodingTools.outputLimit)
         var text = String(decoding: outcome.output, as: UTF8.self)
         if outcome.dropped > 0 { text += "\n… (\(outcome.dropped) more bytes truncated)" }
         switch outcome.stopped {

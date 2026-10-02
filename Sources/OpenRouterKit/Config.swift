@@ -10,6 +10,7 @@
 // given.
 
 import Foundation
+import System
 
 public struct ORConfig: Codable, Sendable, Equatable {
     public var apiKey: String?
@@ -66,8 +67,13 @@ public struct ORConfig: Codable, Sendable, Equatable {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(self)
         let fresh = directory.appendingPathComponent("config.json.\(UUID().uuidString.lowercased()).new")
-        guard FileManager.default.createFile(atPath: fresh.path, contents: data, attributes: [.posixPermissions: 0o600]) else {
-            throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: fresh.path])
+        do {
+            // Made with its permissions, not given them after: no moment
+            // at which another user could open it.
+            let descriptor = try FileDescriptor.open(FilePath(fresh.path), .writeOnly, options: [.create, .exclusiveCreate], permissions: .ownerReadWrite)
+            try descriptor.closeAfter { _ = try descriptor.writeAll(data) }
+        } catch let errno as Errno {
+            throw POSIXError(POSIXErrorCode(rawValue: errno.rawValue) ?? .EIO, userInfo: [NSFilePathErrorKey: fresh.path])
         }
         do {
             // The new file's own permissions, not those of the one it replaces.

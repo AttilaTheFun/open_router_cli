@@ -71,6 +71,18 @@ private func permissions(_ url: URL) throws -> Int {
     #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path) == ["config.json"])
 }
 
+/// A config that cannot be written says so, and leaves nothing behind.
+/// (Not run as root, to whom no folder is unwritable.)
+@Test(.enabled(if: getuid() != 0)) func aConfigThatCannotBeWrittenThrows() throws {
+    let (environment, directory) = try home()
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: directory.path)
+    defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path) }
+    let error = #expect(throws: POSIXError.self) { try ORConfig(apiKey: "sk-or-one").save(environment: environment) }
+    #expect(error?.code == .EACCES)
+    #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path) == [])
+}
+
 @Test func aMissingConfigIsEmptyAndAnUnreadableOneIsNotTakenForEmpty() throws {
     let (environment, directory) = try home()
     #expect(try ORConfig.read(environment: environment) == ORConfig())
