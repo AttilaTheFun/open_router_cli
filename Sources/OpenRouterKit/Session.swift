@@ -46,10 +46,13 @@ public enum ORSessionError: LocalizedError, Equatable {
     /// The id cannot name a session: it would not be a file in the
     /// sessions folder.
     case invalidID(String)
+    /// A new session was to have this id, and a session has it already.
+    case alreadyExists(String)
 
     public var errorDescription: String? {
         switch self {
-        case .invalidID(let id): "\"\(id)\" is not a session id (letters, digits, \"-\", \"_\" and \".\", starting with a letter or digit)."
+        case .invalidID(let id): "\"\(id)\" is not a session id (up to 128 letters, digits, \"-\", \"_\" and \".\", starting with a letter or digit)."
+        case .alreadyExists(let id): "There is already a session \(id); carry it on with --resume \(id)."
         }
     }
 }
@@ -83,9 +86,10 @@ public struct ORSessionStore: Sendable {
         return try JSONDecoder().decode(ORSession.self, from: data)
     }
 
-    public func exists(id: String) -> Bool {
-        guard let url = try? url(for: id) else { return false }
-        return FileManager.default.fileExists(atPath: url.path)
+    /// Whether there is a session with this id. Throws for an id that
+    /// cannot name one.
+    public func exists(id: String) throws -> Bool {
+        FileManager.default.fileExists(atPath: try url(for: id).path)
     }
 
     public func save(_ session: ORSession) throws {

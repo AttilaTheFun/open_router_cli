@@ -17,6 +17,12 @@ actor Conversation {
         }
     }
 
+    /// The turn ran, and what it added could not be written to disk.
+    struct NotSaved: LocalizedError {
+        let reason: String
+        var errorDescription: String? { "The session could not be saved, so what this turn added will be lost when openrouter exits: \(reason)" }
+    }
+
     private let store: ORSessionStore
     private let makeClient: @Sendable () -> OpenRouterClient
     private var session: ORSession
@@ -40,25 +46,33 @@ actor Conversation {
 
     /// - Parameters:
     ///   - resume: a session id to carry on (its file must exist).
-    ///   - sessionID: the id a new session should have (a host that names them).
-    ///   - store: where sessions are kept.
+    ///   - sessionID: the id a new session should have (a host that names
+    ///     them); refused when a session already has it.
+    ///   - cwd: the folder to work in, when one is chosen (`--cwd`). With
+    ///     none, a new session works in the current folder and a resumed
+    ///     one in the folder it was working in.
     ///   - maxRounds: how many rounds of tool calls a turn may take
     ///     (`--max-turns`); the agent's own limit when nil.
+    ///   - store: where sessions are kept.
     ///   - makeClient: the client, made afresh for each turn with the key
     ///     as it is then.
-    init(resume: String?, sessionID: String?, cwd: String, model requested: String?, effort: String?, maxRounds: Int? = nil,
+    init(resume: String?, sessionID: String?, cwd chosen: String?, model requested: String?, effort: String?, maxRounds: Int?,
          store: ORSessionStore = ORSessionStore(), makeClient: @escaping @Sendable () -> OpenRouterClient = { OpenRouterClient() }) throws {
-        let root = (cwd as NSString).expandingTildeInPath
-        let session: ORSession
-        if let resume, !resume.isEmpty {
-            var kept = try store.load(id: resume)
-            if let requested, !requested.isEmpty { kept.model = requested }
-            session = kept
+        // The folder as an absolute path: it is kept in the session, read
+        // by hosts, and has to mean the same from anywhere.
+        let folder = chosen.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath).standardizedFileURL.path }
+        var session: ORSession
+        if let resume {
+            session = try store.load(id: resume)
+            if let requested, !requested.isEmpty { session.model = requested }
+            if let folder { session.cwd = folder }
         } else {
-            session = ORSession(id: sessionID ?? ORSession.newID(), cwd: root, model: ORConfig.model(requested: requested))
-            // An id that cannot name a session file is refused now, not
-            // found out when the first save fails.
-            _ = try store.url(for: session.id)
+            let id = sessionID ?? ORSession.newID()
+            // Checked now: an id that cannot name a session file would
+            // fail at the first save, and one a session already has would
+            // write a new, empty session over it.
+            guard !(try store.exists(id: id)) else { throw ORSessionError.alreadyExists(id) }
+            session = ORSession(id: id, cwd: folder ?? FileManager.default.currentDirectoryPath, model: ORConfig.model(requested: requested))
         }
         let client = makeClient()
         self.store = store
@@ -66,11 +80,15 @@ actor Conversation {
         self.session = session
         self.client = client
         id = session.id
-        self.cwd = root
-        agent = ORAgent(client: client, model: session.model, tools: CodingTools.standard(cwd: root),
-                        systemPrompt: Self.systemPrompt.replacingOccurrences(of: "%CWD%", with: root),
+        cwd = session.cwd
+        agent = ORAgent(client: client, model: session.model, tools: CodingTools.standard(cwd: session.cwd),
+                        systemPrompt: Self.systemPrompt.replacingOccurrences(of: "%CWD%", with: session.cwd),
                         history: session.messages, reasoningEffort: Self.effort(effort), maxRounds: maxRounds ?? ORAgent.defaultMaxRounds)
-        logged = store.loggedCount(id: session.id)
+        // The log holds a line for each message it has been given. One
+        // with more lines than the session has messages (a save that
+        // failed after its append, in an earlier build) is taken as
+        // holding them all: what this run adds is appended after it.
+        logged = min(store.loggedCount(id: session.id), session.messages.count)
     }
 
     var model: String { session.model }
@@ -87,10 +105,11 @@ actor Conversation {
     }
 
     /// The model from the next turn on, kept in the session file.
-    func setModel(_ model: String) async {
+    func setModel(_ model: String) async throws {
         session.model = model
         await agent.setModel(model)
         await save()
+        if let unsaved { throw NotSaved(reason: unsaved) }
     }
 
     /// The key is read afresh for each turn, so a key set after launch
@@ -105,11 +124,12 @@ actor Conversation {
     /// Runs one user turn, handing each event on, and keeps the session
     /// file current as messages land: the user's message at once, so a
     /// host following the log shows it as it is sent. Throws what the
-    /// turn threw (`CancellationError` when it was interrupted); the
-    /// conversation so far is saved either way.
+    /// turn threw (`CancellationError` when it was interrupted), and
+    /// `NotSaved` when the turn ran and the session could not be written.
     func run(_ text: String, sink: @Sendable (ORAgentEvent) async -> Void) async throws {
         await refreshKey()
         guard client.hasKey else { throw NoKey() }
+        let turn: Result<Void, any Error>
         do {
             try await agent.send(text) { event in
                 await sink(event)
@@ -119,29 +139,45 @@ actor Conversation {
                 case .delta, .toolCall, .message, .usage: break
                 }
             }
+            turn = .success(())
         } catch {
-            await save()
-            throw error
+            turn = .failure(error)
         }
+        // Once more, whatever happened: what a save during the turn could
+        // not write is tried again, and a turn that threw is on disk as
+        // far as it got.
         await save()
+        try turn.get()
+        if let unsaved { throw NotSaved(reason: unsaved) }
     }
 
+    /// Why the last save failed, when it did.
+    private var unsaved: String?
+
+    /// Writes the session file and adds to the log what it does not have
+    /// yet. A failure is kept in `unsaved` for the turn to report: an
+    /// event's handler cannot throw, and the turn should not stop for it.
     /// - Parameter latest: the id of the assistant message that has just
     ///   landed, the last in the history.
     private func save(naming latest: String? = nil) async {
         let history = await agent.history
         if let latest { messageIDs[history.count - 1] = latest }
         session.messages = history
-        try? store.save(session)
-        // The log takes what it does not have yet; a session from before
-        // the log gets its whole history the first time. An assistant
-        // message's line gets the message's id, the one it streamed under.
-        guard history.count > logged else { return }
-        let ids = Dictionary(uniqueKeysWithValues: (logged..<history.count).compactMap { place in
-            messageIDs[place].map { (place - logged, $0) }
-        })
-        if (try? store.appendLog(id: session.id, Array(history[logged...]), ids: ids)) != nil {
-            logged = history.count
+        do {
+            try store.save(session)
+            // A session from before the log gets its whole history the
+            // first time. An assistant message's line gets the message's
+            // id, the one it streamed under.
+            if history.count > logged {
+                let ids = Dictionary(uniqueKeysWithValues: (logged..<history.count).compactMap { place in
+                    messageIDs[place].map { (place - logged, $0) }
+                })
+                try store.appendLog(id: session.id, Array(history[logged...]), ids: ids)
+                logged = history.count
+            }
+            unsaved = nil
+        } catch {
+            unsaved = error.localizedDescription
         }
     }
 }

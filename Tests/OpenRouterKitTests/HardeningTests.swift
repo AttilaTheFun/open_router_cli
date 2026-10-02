@@ -211,7 +211,7 @@ func anIdThatIsNotAFileNameIsRefused(id: String) throws {
     #expect(throws: ORSessionError.invalidID(id)) { try store.save(ORSession(id: id, cwd: "/tmp", model: "m")) }
     #expect(throws: ORSessionError.invalidID(id)) { try store.appendLog(id: id, [ORMessage(role: .user, content: "hi")]) }
     #expect(throws: ORSessionError.invalidID(id)) { try store.remove(id: id) }
-    #expect(!store.exists(id: id))
+    #expect(throws: ORSessionError.invalidID(id)) { try store.exists(id: id) }
     #expect(store.loggedCount(id: id) == 0)
     // Nothing was written, there or anywhere beside it.
     #expect(try FileManager.default.contentsOfDirectory(atPath: base.path) == [])

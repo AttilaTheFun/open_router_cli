@@ -7,8 +7,7 @@ import TestSupport
 
 @Test func sessionRoundTripsAndListsNewestFirst() throws {
     let store = ORSessionStore(directory: try scratch().appendingPathComponent("sessions"))
-    var older = ORSession(cwd: "/tmp/a", model: "m", messages: [ORMessage(role: .user, content: "first question\nmore")])
-    older.updated = 100
+    let older = ORSession(cwd: "/tmp/a", model: "m", messages: [ORMessage(role: .user, content: "first question\nmore")])
     try store.save(older)
     let newer = ORSession(cwd: "/tmp/b", model: "m", messages: [ORMessage(role: .user, content: "second")])
     try store.save(newer)
@@ -19,9 +18,9 @@ import TestSupport
     // Saving stamps `updated`, so the newer one lists first.
     #expect(store.list().map(\.id) == [newer.id, older.id])
     #expect(store.list(cwd: "/tmp/a").map(\.id) == [older.id])
-    #expect(store.exists(id: newer.id))
+    #expect(try store.exists(id: newer.id))
     try store.remove(id: newer.id)
-    #expect(!store.exists(id: newer.id))
+    #expect(try !store.exists(id: newer.id))
 }
 
 @Test func theLogIsOnlyAppendedTo() throws {
