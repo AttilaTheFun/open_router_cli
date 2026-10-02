@@ -4,23 +4,38 @@
 // `claude` this way drives `openrouter` the same, unchanged.
 //
 // Out (stdout):
-//   {"type":"system","subtype":"init","session_id":…,"model":…,"cwd":…}
-//   {"type":"stream_event","event":{"type":"message_start","message":{"id":…}}}
-//   {"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":…}}}
+//   {"type":"system","subtype":"init","session_id":…,"model":…,"cwd":…,"tools":[…],"permissionMode":"bypassPermissions","mcp_servers":[]}
+//   {"type":"stream_event","event":{"type":"message_start","message":{"id":…}}}                                  (with --include-partial-messages)
+//   {"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":…}}}        (the same)
 //   {"type":"assistant","message":{"id":…,"model":…,"usage":{…},"content":[{"type":"text",…},{"type":"tool_use",…}]}}
 //   {"type":"user","uuid":…,"message":{"content":[{"type":"tool_result","tool_use_id":…,"content":…}]}}
-//   {"type":"result","is_error":false,"result":…}
+//   {"type":"result","subtype":"success","is_error":false,"result":…}
+//   {"type":"result","subtype":"error_during_execution","is_error":true,"result":…}   (a failed or interrupted turn)
+//   {"type":"result","subtype":"error_max_turns","is_error":true,"result":…}          (a turn out of rounds)
+// An assistant message has one id: `message_start` and `assistant` carry
+// it, and so does the message's line in the session log. A tool call has
+// one id: the `tool_use` block's, which its `tool_result` names in
+// `tool_use_id`, and which the log has as `tool_calls[].id` and
+// `tool_call_id`. The `uuid` of a `user` line is made for that line alone.
+//
 // In (stdin):
 //   {"type":"user","message":{"role":"user","content":[{"type":"text","text":…}]}}   (or "content":"…")
 //   {"type":"control_request","request_id":…,"request":{"subtype":"interrupt"}}
+// and out again for each control request:
+//   {"type":"control_response","response":{"request_id":…,"subtype":"success"}}
+//   {"type":"control_response","response":{"request_id":…,"subtype":"error","error":…}}   (anything but an interrupt)
 
 import Foundation
 
 public enum StreamJSON {
     // MARK: Out
 
+    /// The first line. `permissionMode` and `mcp_servers` are what is in
+    /// effect, whatever the command line asked for: the agent's tools run
+    /// without asking, and it connects to no MCP server.
     public static func systemInit(sessionID: String, model: String, cwd: String, tools: [String]) -> String {
-        line(["type": "system", "subtype": "init", "session_id": sessionID, "model": model, "cwd": cwd, "tools": tools])
+        line(["type": "system", "subtype": "init", "session_id": sessionID, "model": model, "cwd": cwd, "tools": tools,
+              "permissionMode": "bypassPermissions", "mcp_servers": [String]()])
     }
 
     public static func messageStart(id: String) -> String {
@@ -46,20 +61,40 @@ public enum StreamJSON {
         return line(["type": "assistant", "message": body])
     }
 
-    public static func toolResult(callID: String, output: String, isError: Bool = false) -> String {
+    public static func toolResult(callID: String, output: String, isError: Bool) -> String {
         var block: [String: Any] = ["type": "tool_result", "tool_use_id": callID, "content": output]
         if isError { block["is_error"] = true }
         return line(["type": "user", "uuid": UUID().uuidString.lowercased(), "message": ["role": "user", "content": [block]]])
     }
 
-    public static func result(isError: Bool, text: String, sessionID: String) -> String {
-        line(["type": "result", "subtype": isError ? "error_during_execution" : "success", "is_error": isError, "result": text, "session_id": sessionID])
+    /// How a turn ended: the `subtype` of its result line, as Claude Code
+    /// names them.
+    public enum ResultKind: String, Sendable {
+        case success
+        /// The turn failed, or was interrupted.
+        case errorDuringExecution = "error_during_execution"
+        /// The turn used all its rounds of tool calls.
+        case errorMaxTurns = "error_max_turns"
     }
 
+    public static func result(_ kind: ResultKind, text: String, sessionID: String) -> String {
+        line(["type": "result", "subtype": kind.rawValue, "is_error": kind != .success, "result": text, "session_id": sessionID])
+    }
+
+    /// The answer to a control request that was carried out.
     public static func controlResponse(requestID: String) -> String {
         line(["type": "control_response", "response": ["request_id": requestID, "subtype": "success"]])
     }
 
+    /// The answer to a control request that was not, and why: a host
+    /// that waits for an answer gets one either way.
+    public static func controlError(requestID: String, error: String) -> String {
+        line(["type": "control_response", "response": ["request_id": requestID, "subtype": "error", "error": error]])
+    }
+
+    /// One line of output. What is given here is strings, numbers, and
+    /// arrays and dictionaries of them (a tool call's input having come
+    /// out of the same serialiser), which always serialises.
     static func line(_ object: [String: Any]) -> String {
         guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else { return "{}" }
         return String(decoding: data, as: UTF8.self)
@@ -68,10 +103,14 @@ public enum StreamJSON {
     // MARK: In
 
     public enum Input: Equatable, Sendable {
-        /// A user turn: the text of its content blocks, joined.
+        /// A user turn: the text of its content blocks, joined. Empty
+        /// when the message has no text (only images, say).
         case user(String)
         /// Interrupt the turn in flight.
         case interrupt(requestID: String)
+        /// A control request other than an interrupt, by its subtype
+        /// (Claude Code has several: `initialize`, `set_model`, …).
+        case control(requestID: String, subtype: String)
     }
 
     public static func parse(_ line: String) -> Input? {
@@ -85,8 +124,9 @@ public enum StreamJSON {
             let text = blocks.filter { $0["type"] as? String == "text" }.compactMap { $0["text"] as? String }.joined(separator: "\n")
             return .user(text)
         case "control_request":
-            guard (object["request"] as? [String: Any])?["subtype"] as? String == "interrupt" else { return nil }
-            return .interrupt(requestID: object["request_id"] as? String ?? "")
+            let requestID = object["request_id"] as? String ?? ""
+            let subtype = (object["request"] as? [String: Any])?["subtype"] as? String ?? ""
+            return subtype == "interrupt" ? .interrupt(requestID: requestID) : .control(requestID: requestID, subtype: subtype)
         default:
             return nil
         }
