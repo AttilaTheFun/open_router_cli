@@ -17,22 +17,19 @@ public protocol ORTransport: Sendable {
 
 public struct OpenRouterClient: Sendable {
     public let apiKey: String
-    public let baseURL: URL
-    public let referer: String
-    public let title: String
     private let transport: any ORTransport
 
-    /// - Parameter apiKey: defaults to the resolved key (`ORConfig.resolvedKey`:
-    ///   the environment, else the config file).
-    public init(apiKey: String? = nil,
-                baseURL: URL = URL(string: "https://openrouter.ai/api/v1")!,
-                referer: String = "https://github.com/AttilaTheFun/open_router_cli",
-                title: String = "openrouter",
-                transport: (any ORTransport)? = nil) {
+    private static let baseURL = URL(string: "https://openrouter.ai/api/v1")!
+    /// How the requests name their sender to OpenRouter.
+    private static let referer = "https://github.com/AttilaTheFun/open_router_cli"
+    private static let title = "openrouter"
+
+    /// - Parameters:
+    ///   - apiKey: defaults to the resolved key (`ORConfig.resolvedKey`:
+    ///     the environment, else the config file).
+    ///   - transport: defaults to URLSession's.
+    public init(apiKey: String? = nil, transport: (any ORTransport)? = nil) {
         self.apiKey = apiKey ?? ORConfig.resolvedKey() ?? ""
-        self.baseURL = baseURL
-        self.referer = referer
-        self.title = title
         self.transport = transport ?? URLSessionTransport()
     }
 
@@ -44,8 +41,8 @@ public struct OpenRouterClient: Sendable {
         // Without a key, no header: the model list is public, and only a
         // chat needs one.
         if !apiKey.isEmpty { request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
-        request.setValue(referer, forHTTPHeaderField: "HTTP-Referer")
-        request.setValue(title, forHTTPHeaderField: "X-Title")
+        request.setValue(Self.referer, forHTTPHeaderField: "HTTP-Referer")
+        request.setValue(Self.title, forHTTPHeaderField: "X-Title")
         return request
     }
 
@@ -53,7 +50,7 @@ public struct OpenRouterClient: Sendable {
     /// `OpenRouterError` (401) when it does not. The model list cannot
     /// tell: it is public, and answers whatever key it is asked with.
     public func checkKey() async throws {
-        let (data, response) = try await transport.data(for: authorized(baseURL.appendingPathComponent("key"), method: "GET"))
+        let (data, response) = try await transport.data(for: authorized(Self.baseURL.appendingPathComponent("key"), method: "GET"))
         guard (200..<300).contains(response.statusCode) else {
             throw OpenRouterError(status: response.statusCode, body: String(decoding: data, as: UTF8.self))
         }
@@ -62,7 +59,7 @@ public struct OpenRouterClient: Sendable {
     /// The models OpenRouter offers, id-sorted; with a category
     /// ("programming"), that category's models in OpenRouter's order.
     public func models(category: String? = nil) async throws -> [ORModel] {
-        var url = baseURL.appendingPathComponent("models")
+        var url = Self.baseURL.appendingPathComponent("models")
         if let category, var parts = URLComponents(url: url, resolvingAgainstBaseURL: false) {
             parts.queryItems = [URLQueryItem(name: "category", value: category)]
             url = parts.url ?? url
@@ -85,7 +82,7 @@ public struct OpenRouterClient: Sendable {
     /// the reading: what is returned is only ever a completion the API
     /// said was complete.
     public func complete(_ chat: ORChatRequest, onEvent: @Sendable (ORStreamEvent) async -> Void) async throws -> ORCompletion {
-        var request = authorized(baseURL.appendingPathComponent("chat/completions"), method: "POST")
+        var request = authorized(Self.baseURL.appendingPathComponent("chat/completions"), method: "POST")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try Self.body(chat)
         let (lines, response) = try await transport.lines(for: request)
@@ -110,20 +107,37 @@ public struct OpenRouterClient: Sendable {
         return try assembler.finish(sawDone: sawDone)
     }
 
-    static func body(_ chat: ORChatRequest) throws -> Data {
-        var object: [String: Any] = [
-            "model": chat.model,
-            "messages": try messagesJSON(chat.messages),
-            "stream": true,
-        ]
-        if let temperature = chat.temperature { object["temperature"] = temperature }
-        if let effort = chat.reasoningEffort, !effort.isEmpty { object["reasoning"] = ["effort": effort] }
-        if !chat.tools.isEmpty { object["tools"] = try chat.tools.map { try $0.wire() } }
-        return try JSONSerialization.data(withJSONObject: object)
+    /// The body of a completion request, as the API takes it.
+    private struct Body: Encodable {
+        struct Reasoning: Encodable {
+            let effort: String
+        }
+
+        struct Tool: Encodable {
+            struct Function: Encodable {
+                let name: String
+                let description: String
+                let parameters: JSONValue
+            }
+
+            let type = "function"
+            let function: Function
+        }
+
+        let model: String
+        let messages: [ORMessage]
+        let stream = true
+        let reasoning: Reasoning?
+        let tools: [Tool]?
     }
 
-    static func messagesJSON(_ messages: [ORMessage]) throws -> [[String: Any]] {
-        let data = try JSONEncoder().encode(messages)
-        return (try JSONSerialization.jsonObject(with: data) as? [[String: Any]]) ?? []
+    static func body(_ chat: ORChatRequest) throws -> Data {
+        let tools = try chat.tools.map { tool in
+            Body.Tool(function: .init(name: tool.name, description: tool.toolDescription, parameters: try tool.parameters()))
+        }
+        let effort = chat.reasoningEffort.flatMap { $0.isEmpty ? nil : Body.Reasoning(effort: $0) }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.withoutEscapingSlashes]
+        return try encoder.encode(Body(model: chat.model, messages: chat.messages, reasoning: effort, tools: tools.isEmpty ? nil : tools))
     }
 }

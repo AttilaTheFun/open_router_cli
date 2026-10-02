@@ -18,12 +18,9 @@ public enum ORAgentEvent: Sendable {
     /// and whether it is an error's — the tool threw, there is no such
     /// tool, or the turn was interrupted — rather than the tool's own.
     case toolResult(name: String, output: String, id: String, isError: Bool)
-    /// One assistant message finished (text). A turn may have several,
-    /// with tool runs between; each is its own message.
-    case message(String)
     /// One completion finished: the assistant message whole, its text and
-    /// the tool calls it asked for, before any of them runs. What a
-    /// consumer that shows the calls beside the words wants. The id is
+    /// the tool calls it asked for, before any of them runs. A turn may
+    /// have several, with tool runs between. The id is
     /// the message's own, the agent's: its deltas carried it, and a
     /// consumer that keeps the message keeps it under it, so whoever
     /// watched the message stream finds it on record by the same name.
@@ -33,13 +30,19 @@ public enum ORAgentEvent: Sendable {
 }
 
 public enum ORAgentError: LocalizedError, Equatable {
+    /// Why a reply stopped before it was whole, as the API names it.
+    public enum CutOff: String, Sendable {
+        /// The model reached its output limit.
+        case length
+        case contentFilter = "content_filter"
+    }
+
     /// `send` was called while a turn was still running.
     case turnInProgress
-    /// The model stopped before its reply was whole, for the reason the
-    /// API gave: "length" (its output limit) or "content_filter". The
-    /// text it had written is in the conversation; any tool calls, whose
-    /// arguments may be cut short, are not, and were not run.
-    case replyCutOff(reason: String)
+    /// The model stopped before its reply was whole. The text it had
+    /// written is in the conversation; any tool calls, whose arguments
+    /// may be cut short, are not, and were not run.
+    case replyCutOff(CutOff)
     /// The model finished with neither text nor a tool call.
     case emptyReply
     /// The turn used all its rounds of tool calls without a final answer.
@@ -48,9 +51,8 @@ public enum ORAgentError: LocalizedError, Equatable {
     public var errorDescription: String? {
         switch self {
         case .turnInProgress: "A turn is already running in this conversation."
-        case .replyCutOff("length"): "The reply was cut off: the model reached its output limit."
-        case .replyCutOff("content_filter"): "The reply was cut off by a content filter."
-        case .replyCutOff(let reason): "The reply was cut off (\(reason))."
+        case .replyCutOff(.length): "The reply was cut off: the model reached its output limit."
+        case .replyCutOff(.contentFilter): "The reply was cut off by a content filter."
         case .emptyReply: "The model replied with nothing."
         case .tooManyRounds(let rounds): "The turn was stopped after \(rounds) rounds of tool calls without a final answer."
         }
@@ -61,13 +63,12 @@ public enum ORAgentError: LocalizedError, Equatable {
 /// conversation is its state, and a turn is one call on it, which returns
 /// when the turn is over. One turn runs at a time.
 public actor ORAgent {
-    public private(set) var client: OpenRouterClient
-    public private(set) var model: String
-    public let temperature: Double?
+    private var client: OpenRouterClient
+    private var model: String
     /// The reasoning effort asked of the model, when one is.
-    public let reasoningEffort: String?
+    private let reasoningEffort: String?
     /// How many tool rounds a single turn may take before it gives up.
-    public let maxRounds: Int
+    private let maxRounds: Int
     private let tools: [any ORTool]
     private let toolsByName: [String: any ORTool]
     /// The whole conversation, growing with each turn; the source of
@@ -81,12 +82,10 @@ public actor ORAgent {
     /// - Parameter history: messages already had (resuming a conversation),
     ///   without the system prompt: what `history` gives back.
     public init(client: OpenRouterClient, model: String, tools: [any ORTool] = [], systemPrompt: String? = nil,
-                history: [ORMessage] = [], temperature: Double? = nil, reasoningEffort: String? = nil,
-                maxRounds: Int = ORAgent.defaultMaxRounds) {
+                history: [ORMessage] = [], reasoningEffort: String? = nil, maxRounds: Int = ORAgent.defaultMaxRounds) {
         self.client = client
         self.model = model
         self.tools = tools
-        self.temperature = temperature
         self.reasoningEffort = reasoningEffort
         self.maxRounds = maxRounds
         toolsByName = Dictionary(tools.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
@@ -110,9 +109,6 @@ public actor ORAgent {
 
     /// The client the next completion goes through (a new key).
     public func setClient(_ client: OpenRouterClient) { self.client = client }
-
-    /// The finish reasons that mean the reply is not whole.
-    private static let cutOffReasons: Set<String> = ["length", "content_filter"]
 
     /// Runs a user turn to completion, reporting events as it goes, and
     /// returns when the model has replied without calling a tool: a
@@ -148,7 +144,7 @@ public actor ORAgent {
         for _ in 0..<maxRounds {
             try Task.checkCancellation()
             let request = ORChatRequest(model: model, messages: ORMessage.answeringEveryToolCall(messages), tools: tools,
-                                        temperature: temperature, reasoningEffort: reasoningEffort)
+                                        reasoningEffort: reasoningEffort)
             let messageID = Self.newMessageID()
             let completion = try await client.complete(request) { event in
                 switch event {
@@ -157,7 +153,7 @@ public actor ORAgent {
                 }
             }
             var message = completion.message
-            let cutOff = completion.finishReason.flatMap { Self.cutOffReasons.contains($0) ? $0 : nil }
+            let cutOff = completion.finishReason.flatMap(ORAgentError.CutOff.init(rawValue:))
             // A reply cut off may have cut a tool call's arguments short:
             // its calls are neither kept nor run.
             if cutOff != nil { message.toolCalls = nil }
@@ -166,9 +162,8 @@ public actor ORAgent {
             if !text.isEmpty || !calls.isEmpty {
                 messages.append(message)
                 await onEvent(.assistant(message, id: messageID))
-                if !text.isEmpty { await onEvent(.message(text)) }
             }
-            if let cutOff { throw ORAgentError.replyCutOff(reason: cutOff) }
+            if let cutOff { throw ORAgentError.replyCutOff(cutOff) }
             if text.isEmpty, calls.isEmpty { throw ORAgentError.emptyReply }
             if calls.isEmpty { return }
             for call in calls {

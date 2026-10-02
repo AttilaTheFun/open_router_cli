@@ -21,14 +21,14 @@ public struct ORSession: Codable, Sendable, Identifiable, Equatable {
     public var updated: Double
     public var messages: [ORMessage]
 
-    public init(id: String = ORSession.newID(), cwd: String, model: String, messages: [ORMessage] = [],
-                created: Double = Date().timeIntervalSince1970, updated: Double = Date().timeIntervalSince1970) {
+    /// A session made now.
+    public init(id: String = ORSession.newID(), cwd: String, model: String, messages: [ORMessage] = []) {
         self.id = id
         self.cwd = cwd
         self.model = model
         self.messages = messages
-        self.created = created
-        self.updated = updated
+        created = Date().timeIntervalSince1970
+        updated = created
     }
 
     /// A lowercase UUID, the shape Claude's and Codex's session ids have.
@@ -102,11 +102,6 @@ public struct ORSessionStore: Sendable {
         try encoder.encode(stamped).write(to: url, options: .atomic)
     }
 
-    public func remove(id: String) throws {
-        try FileManager.default.removeItem(at: url(for: id))
-        try? FileManager.default.removeItem(at: logURL(for: id))
-    }
-
     /// The session's log: a line per message, appended to only. Throws
     /// for an id that cannot name one.
     public func logURL(for id: String) throws -> URL { try file(id, ".jsonl") }
@@ -122,7 +117,7 @@ public struct ORSessionStore: Sendable {
     /// - Parameter ids: the id of a message's line, by its place in
     ///   `messages`, for the messages that have one already (an assistant
     ///   message's, from the agent); the rest get new ones.
-    public func appendLog(id: String, _ messages: [ORMessage], ids: [Int: String] = [:]) throws {
+    public func appendLog(id: String, _ messages: [ORMessage], ids: [Int: String]) throws {
         guard !messages.isEmpty else { return }
         let url = try logURL(for: id)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

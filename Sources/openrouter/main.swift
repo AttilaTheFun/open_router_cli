@@ -250,7 +250,7 @@ func chat(resume: String?) async -> Int32 {
                 case .toolResult(_, let result, _, _):
                     let first = result.split(separator: "\n").prefix(3).joined(separator: "\n")
                     output.text("  \(first.replacingOccurrences(of: "\n", with: "\n  "))\n")
-                case .started, .message, .assistant, .usage: break
+                case .started, .assistant, .usage: break
                 }
             }
             output.text("\n")
