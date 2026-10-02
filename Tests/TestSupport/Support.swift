@@ -15,6 +15,11 @@ public actor MockTransport: ORTransport {
 
     private let dataBody: Data
     private let status: Int
+    /// Answers to plain requests by path (and query, when there is one),
+    /// for the ones that are not `status` and `dataBody`.
+    private let answers: [String: (status: Int, body: String)]
+    /// The paths (and queries) of the plain requests, in order.
+    public private(set) var requested: [String] = []
     /// SSE line batches, one per completion the agent asks for, in order.
     private let streams: [[String]]
     private var index = 0
@@ -23,15 +28,19 @@ public actor MockTransport: ORTransport {
     /// The Authorization header of the last plain request, if it had one.
     public private(set) var lastAuthorization: String?
 
-    public init(streams: [[String]] = [], status: Int = 200, dataBody: Data = Data()) {
+    public init(streams: [[String]] = [], status: Int = 200, dataBody: Data = Data(), answers: [String: (status: Int, body: String)] = [:]) {
         self.streams = streams
         self.status = status
         self.dataBody = dataBody
+        self.answers = answers
     }
 
     public func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         lastAuthorization = request.value(forHTTPHeaderField: "Authorization")
-        return (dataBody, try response(to: request))
+        let asked = (request.url?.path ?? "") + (request.url?.query.map { "?" + $0 } ?? "")
+        requested.append(asked)
+        if let answer = answers[asked] { return (Data(answer.body.utf8), try response(to: request, status: answer.status)) }
+        return (dataBody, try response(to: request, status: status))
     }
 
     public func lines(for request: URLRequest) async throws -> (any AsyncSequence<String, any Error> & Sendable, HTTPURLResponse) {
@@ -50,7 +59,7 @@ public actor MockTransport: ORTransport {
             }
             continuation.onTermination = { _ in feeding.cancel() }
         }
-        return (stream, try response(to: request))
+        return (stream, try response(to: request, status: status))
     }
 
     /// The messages of each completion asked for, as sent.
@@ -62,7 +71,7 @@ public actor MockTransport: ORTransport {
         }
     }
 
-    private func response(to request: URLRequest) throws -> HTTPURLResponse {
+    private func response(to request: URLRequest, status: Int) throws -> HTTPURLResponse {
         guard let url = request.url, let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: nil) else {
             throw URLError(.badURL)
         }

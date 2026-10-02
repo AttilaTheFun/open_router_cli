@@ -49,6 +49,16 @@ public struct OpenRouterClient: Sendable {
         return request
     }
 
+    /// Asks OpenRouter whether it knows the key (`GET /key`), and throws
+    /// `OpenRouterError` (401) when it does not. The model list cannot
+    /// tell: it is public, and answers whatever key it is asked with.
+    public func checkKey() async throws {
+        let (data, response) = try await transport.data(for: authorized(baseURL.appendingPathComponent("key"), method: "GET"))
+        guard (200..<300).contains(response.statusCode) else {
+            throw OpenRouterError(status: response.statusCode, body: String(decoding: data, as: UTF8.self))
+        }
+    }
+
     /// The models OpenRouter offers, id-sorted; with a category
     /// ("programming"), that category's models in OpenRouter's order.
     public func models(category: String? = nil) async throws -> [ORModel] {
@@ -59,7 +69,7 @@ public struct OpenRouterClient: Sendable {
         }
         let (data, response) = try await transport.data(for: authorized(url, method: "GET"))
         guard (200..<300).contains(response.statusCode) else {
-            throw OpenRouterError(status: response.statusCode, body: String(data: data, encoding: .utf8) ?? "")
+            throw OpenRouterError(status: response.statusCode, body: String(decoding: data, as: UTF8.self))
         }
         struct List: Decodable { let data: [ORModel] }
         let list = try JSONDecoder().decode(List.self, from: data).data
@@ -108,7 +118,7 @@ public struct OpenRouterClient: Sendable {
         ]
         if let temperature = chat.temperature { object["temperature"] = temperature }
         if let effort = chat.reasoningEffort, !effort.isEmpty { object["reasoning"] = ["effort": effort] }
-        if !chat.tools.isEmpty { object["tools"] = chat.tools.map(\.wire) }
+        if !chat.tools.isEmpty { object["tools"] = try chat.tools.map { try $0.wire() } }
         return try JSONSerialization.data(withJSONObject: object)
     }
 

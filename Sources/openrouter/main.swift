@@ -64,6 +64,18 @@ func readSecret(prompt: String) -> String {
     return readLine() ?? ""
 }
 
+/// The config as it is on disk, for a command that will write it back; or
+/// nil, having said why, when the file there cannot be read as a config
+/// and so must not be replaced.
+func configToChange() -> ORConfig? {
+    do {
+        return try ORConfig.read()
+    } catch {
+        output.error("\(ORConfig.file().path) is not a config openrouter can read (\(error.localizedDescription)); mend it or move it away first.")
+        return nil
+    }
+}
+
 func auth(_ subcommand: String?, _ rest: [String]) async -> Int32 {
     switch subcommand {
     case "login":
@@ -71,18 +83,25 @@ func auth(_ subcommand: String?, _ rest: [String]) async -> Int32 {
         if key.isEmpty { key = readSecret(prompt: "OpenRouter API key (https://openrouter.ai/keys): ") }
         key = key.trimmingCharacters(in: .whitespacesAndNewlines)
         guard key.hasPrefix("sk-or-") else { output.error("That does not look like an OpenRouter key (they start with sk-or-)."); return 1 }
-        let client = OpenRouterClient(apiKey: key)
-        do { _ = try await client.models() } catch { output.error("OpenRouter rejected the key: \(error.localizedDescription)"); return 1 }
-        var config = ORConfig.load()
+        do {
+            try await OpenRouterClient(apiKey: key).checkKey()
+        } catch let refused as OpenRouterError where refused.status == 401 || refused.status == 403 {
+            output.error("OpenRouter does not know that key.")
+            return 1
+        } catch {
+            output.error("Could not check the key with OpenRouter: \(error.localizedDescription)")
+            return 1
+        }
+        guard var config = configToChange() else { return 1 }
         config.apiKey = key
-        do { try config.save() } catch { output.error("Could not save \(ORConfig.file.path): \(error.localizedDescription)"); return 1 }
-        output.line("Saved to \(ORConfig.file.path)")
+        do { try config.save() } catch { output.error("Could not save \(ORConfig.file().path): \(error.localizedDescription)"); return 1 }
+        output.line("Saved to \(ORConfig.file().path)")
         return 0
     case "logout":
-        var config = ORConfig.load()
+        guard var config = configToChange() else { return 1 }
         config.apiKey = nil
-        do { try config.save() } catch { output.error("Could not save \(ORConfig.file.path): \(error.localizedDescription)"); return 1 }
-        output.line("Key removed from \(ORConfig.file.path)")
+        do { try config.save() } catch { output.error("Could not save \(ORConfig.file().path): \(error.localizedDescription)"); return 1 }
+        output.line("Key removed from \(ORConfig.file().path)")
         return 0
     case "status", nil:
         if let source = ORConfig.keySource() {
@@ -101,20 +120,20 @@ func auth(_ subcommand: String?, _ rest: [String]) async -> Int32 {
 func models() async -> Int32 {
     // OpenRouter's model list is public: no login needed to see or keep it
     // (a host shows it before a key is set; running a model needs one).
-    let client = OpenRouterClient()
+    let cache = ORModelCache()
     do {
         // The list is kept on disk for hosts to read; asked for, it is
         // fetched afresh and kept again.
-        var list = try await ORModelCache.refresh(client: client)
-        if options.flags.contains("refresh") { output.line("Kept \(list.count) models in \(ORModelCache.file.path)"); return 0 }
-        if options.flags.contains("free") { list = list.filter { $0.id.hasSuffix(":free") } }
+        var list = try await cache.refresh(client: OpenRouterClient())
+        if options.flags.contains("refresh") { output.line("Kept \(list.count) models in \(cache.file.path)"); return 0 }
+        if options.flags.contains("free") { list = list.filter(\.isFree) }
         if options.flags.contains("tools") { list = list.filter { $0.supportsTools } }
         if options.flags.contains("json") {
             let data = try JSONEncoder().encode(list)
             output.line(String(decoding: data, as: UTF8.self))
         } else {
             for model in list {
-                let price = model.pricePerMillion.map { model.isFree ? "  free" : String(format: "  $%.2f/$%.2f per M", $0.input, $0.output) } ?? ""
+                let price = model.isFree ? "  free" : model.pricePerMillion.map { String(format: "  $%.2f/$%.2f per M", $0.input, $0.output) } ?? ""
                 output.line(model.id + (model.contextLength.map { "  (\($0) ctx)" } ?? "") + (model.supportsTools ? "  tools" : "") + price)
             }
         }
@@ -161,7 +180,13 @@ func headless() async -> Int32 {
                                           tools: CodingTools.standard(cwd: conversation.cwd).map(\.name)))
     }
     // A host reads the model list from disk; keep it no older than a day.
-    if ORModelCache.isStale, await conversation.hasKey { Task.detached { _ = try? await ORModelCache.refresh() } }
+    // The list is public, so this needs no key. It is fetched beside the
+    // session, not before it, and a fetch that fails is left for the next
+    // run: the list on disk stays as it was, and there is nobody to tell
+    // (a host reads stderr for the session's failures, and this is not
+    // one).
+    let cache = ORModelCache()
+    if cache.isStale { Task { _ = try? await cache.refresh(client: OpenRouterClient()) } }
     let runner = HeadlessRunner(conversation: conversation, streamOut: streamOut,
                                 partialMessages: options.flags.contains("include-partial-messages"), output: output)
     if streamIn {

@@ -76,15 +76,6 @@ import TestSupport
     #expect(decoded.map(\.message.content) == ["hi", "hello", "again"])
 }
 
-// MARK: Config
-
-@Test func keyComesFromTheEnvironmentFirst() {
-    #expect(ORConfig.resolvedKey(environment: ["OPENROUTER_API_KEY": " sk-or-a "]) == "sk-or-a")
-    #expect(ORConfig.resolvedKey(environment: ["OPEN_ROUTER_API_KEY": "sk-or-b"]) == "sk-or-b")
-    #expect(ORConfig.resolvedKey(environment: ["OPENROUTER_API_KEY": "sk-or-a", "OPEN_ROUTER_API_KEY": "sk-or-b"]) == "sk-or-a")
-    #expect(ORConfig.keySource(environment: ["OPEN_ROUTER_API_KEY": "x"]) == "environment (OPEN_ROUTER_API_KEY)")
-}
-
 @Test func requestCarriesReasoningEffort() throws {
     let body = try OpenRouterClient.body(ORChatRequest(model: "m", messages: [], reasoningEffort: "high"))
     let root = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])

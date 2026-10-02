@@ -53,8 +53,9 @@ public struct ORModel: Codable, Identifiable, Hashable, Sendable {
 
 /// OpenRouter's model list, kept on disk (~/.openrouter/models.json) so a
 /// host that shows it — Visor's model picker — reads a file rather than
-/// the API, and the CLI refreshes it at most once a day.
-public enum ORModelCache {
+/// the API. `openrouter models` fetches it afresh; a headless run fetches
+/// it when what is on disk is more than a day old.
+public struct ORModelCache: Sendable {
     public struct Contents: Codable, Sendable {
         /// Seconds since 1970.
         public var fetched: Double
@@ -64,30 +65,39 @@ public enum ORModelCache {
         public var programming: [String]?
     }
 
-    public static var file: URL { ORConfig.directory.appendingPathComponent("models.json") }
+    public let file: URL
+    /// How old the list may be before a headless run fetches it again.
     public static let maxAge: Double = 24 * 60 * 60
 
-    public static func load() -> Contents? {
+    public init(file: URL = ORConfig.directory().appendingPathComponent("models.json")) {
+        self.file = file
+    }
+
+    public func load() -> Contents? {
         guard let data = try? Data(contentsOf: file) else { return nil }
         return try? JSONDecoder().decode(Contents.self, from: data)
     }
 
-    public static var isStale: Bool {
+    /// Whether there is no list on disk, or one older than `maxAge`.
+    public var isStale: Bool {
         guard let fetched = load()?.fetched else { return true }
-        return Date().timeIntervalSince1970 - fetched > maxAge
+        return Date().timeIntervalSince1970 - fetched > Self.maxAge
     }
 
-    public static func save(_ models: [ORModel], programming: [String]? = nil) throws {
-        try FileManager.default.createDirectory(at: ORConfig.directory, withIntermediateDirectories: true)
+    public func save(_ models: [ORModel], programming: [String]?) throws {
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
         let data = try JSONEncoder().encode(Contents(fetched: Date().timeIntervalSince1970, models: models, programming: programming))
         try data.write(to: file, options: .atomic)
     }
 
-    /// Fetches the list and keeps it; the models, or a throw.
+    /// Fetches the list and keeps it; the models, or a throw. The
+    /// programming category is a second request: when only that one
+    /// fails, the category already on disk is kept with the new list,
+    /// not wiped.
     @discardableResult
-    public static func refresh(client: OpenRouterClient = OpenRouterClient()) async throws -> [ORModel] {
+    public func refresh(client: OpenRouterClient) async throws -> [ORModel] {
         let models = try await client.models()
-        let programming = try? await client.models(category: "programming").map(\.id)
+        let programming = (try? await client.models(category: "programming").map(\.id)) ?? load()?.programming
         try save(models, programming: programming)
         return models
     }
@@ -187,17 +197,22 @@ public protocol ORTool: Sendable {
     func call(arguments: String) async throws -> String
 }
 
+/// A tool whose `parametersJSON` is not a JSON object: the request cannot
+/// describe it to the model.
+public struct ORToolSchemaError: LocalizedError, Equatable {
+    public let tool: String
+    public var errorDescription: String? { "The parameters of the tool \"\(tool)\" are not a JSON object." }
+}
+
 extension ORTool {
-    /// The tool as the API's `tools` array wants it.
-    var wire: [String: Any] {
-        [
-            "type": "function",
-            "function": [
-                "name": name,
-                "description": toolDescription,
-                "parameters": (try? JSONSerialization.jsonObject(with: Data(parametersJSON.utf8))) ?? ["type": "object"],
-            ],
-        ]
+    /// The tool as the API's `tools` array wants it. Throws when its
+    /// parameters are not a JSON object: sent as "takes anything", the
+    /// model would call it blind.
+    func wire() throws -> [String: Any] {
+        guard let parameters = (try? JSONSerialization.jsonObject(with: Data(parametersJSON.utf8))) as? [String: Any] else {
+            throw ORToolSchemaError(tool: name)
+        }
+        return ["type": "function", "function": ["name": name, "description": toolDescription, "parameters": parameters]]
     }
 }
 

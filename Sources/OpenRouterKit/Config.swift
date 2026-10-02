@@ -5,7 +5,9 @@
 //
 // The key: OPENROUTER_API_KEY (or OPEN_ROUTER_API_KEY) in the environment,
 // else `apiKey` in ~/.openrouter/config.json (`openrouter auth login`).
-// The home directory can be moved with OPENROUTER_HOME.
+// The home directory can be moved with OPENROUTER_HOME. Everything here
+// takes the environment to read, the process's own unless another is
+// given.
 
 import Foundation
 
@@ -23,53 +25,91 @@ public struct ORConfig: Codable, Sendable, Equatable {
     /// quick, and able to call tools.
     public static let defaultModel = "openai/gpt-5-nano"
 
+    /// The environment variables a key is looked for in, in order.
+    static let keyVariables = ["OPENROUTER_API_KEY", "OPEN_ROUTER_API_KEY"]
+
     /// ~/.openrouter, or OPENROUTER_HOME.
-    public static var directory: URL {
-        if let home = ProcessInfo.processInfo.environment["OPENROUTER_HOME"], !home.isEmpty {
+    public static func directory(environment: [String: String] = ProcessInfo.processInfo.environment) -> URL {
+        if let home = environment["OPENROUTER_HOME"], !home.isEmpty {
             return URL(fileURLWithPath: (home as NSString).expandingTildeInPath, isDirectory: true)
         }
         return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".openrouter", isDirectory: true)
     }
 
-    public static var file: URL { directory.appendingPathComponent("config.json") }
-
-    public static func load() -> ORConfig {
-        guard let data = try? Data(contentsOf: file), let config = try? JSONDecoder().decode(ORConfig.self, from: data) else {
-            return ORConfig()
-        }
-        return config
+    public static func file(environment: [String: String] = ProcessInfo.processInfo.environment) -> URL {
+        directory(environment: environment).appendingPathComponent("config.json")
     }
 
-    public func save() throws {
-        try FileManager.default.createDirectory(at: Self.directory, withIntermediateDirectories: true)
+    /// The config as it is on disk: empty when there is no file, and a
+    /// throw when there is one that cannot be read as a config. What
+    /// writes the file back (`auth login`, `auth logout`) reads it with
+    /// this, so a file it cannot make sense of is not replaced.
+    public static func read(environment: [String: String] = ProcessInfo.processInfo.environment) throws -> ORConfig {
+        let file = file(environment: environment)
+        guard FileManager.default.fileExists(atPath: file.path) else { return ORConfig() }
+        return try JSONDecoder().decode(ORConfig.self, from: Data(contentsOf: file))
+    }
+
+    /// The config to run with: what is on disk, or an empty one when
+    /// there is nothing there that reads as a config.
+    public static func load(environment: [String: String] = ProcessInfo.processInfo.environment) -> ORConfig {
+        (try? read(environment: environment)) ?? ORConfig()
+    }
+
+    /// Writes the config. The key is a secret: the file is the owner's
+    /// alone from the moment it exists, made so beside its place and then
+    /// moved into it, never written readable and closed up after.
+    public func save(environment: [String: String] = ProcessInfo.processInfo.environment) throws {
+        let directory = Self.directory(environment: environment)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try encoder.encode(self).write(to: Self.file, options: .atomic)
-        // The key is a secret: owner-only.
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: Self.file.path)
+        let data = try encoder.encode(self)
+        let fresh = directory.appendingPathComponent("config.json.\(UUID().uuidString.lowercased()).new")
+        guard FileManager.default.createFile(atPath: fresh.path, contents: data, attributes: [.posixPermissions: 0o600]) else {
+            throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: fresh.path])
+        }
+        do {
+            // The new file's own permissions, not those of the one it replaces.
+            _ = try FileManager.default.replaceItemAt(Self.file(environment: environment), withItemAt: fresh, options: .usingNewMetadataOnly)
+        } catch {
+            try? FileManager.default.removeItem(at: fresh)
+            throw error
+        }
+    }
+
+    /// The key in a variable of the environment, and the variable's name:
+    /// the first of `keyVariables` that holds more than white space.
+    private static func environmentKey(_ environment: [String: String]) -> (name: String, key: String)? {
+        for name in keyVariables {
+            if let key = environment[name]?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty { return (name, key) }
+        }
+        return nil
+    }
+
+    /// The key in the config file, when it holds more than white space.
+    private static func fileKey(_ environment: [String: String]) -> String? {
+        guard let key = load(environment: environment).apiKey?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty else { return nil }
+        return key
     }
 
     /// The key to use: the environment first, then the config file. Nil
     /// when there is none anywhere.
     public static func resolvedKey(environment: [String: String] = ProcessInfo.processInfo.environment) -> String? {
-        for name in ["OPENROUTER_API_KEY", "OPEN_ROUTER_API_KEY"] {
-            if let key = environment[name]?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty { return key }
-        }
-        if let key = load().apiKey?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty { return key }
-        return nil
+        environmentKey(environment)?.key ?? fileKey(environment)
     }
 
-    /// Where the key came from, for `openrouter auth status`.
+    /// Where the key `resolvedKey` gives came from, for `openrouter auth
+    /// status`. Nil exactly when there is no key.
     public static func keySource(environment: [String: String] = ProcessInfo.processInfo.environment) -> String? {
-        for name in ["OPENROUTER_API_KEY", "OPEN_ROUTER_API_KEY"] where !(environment[name] ?? "").isEmpty { return "environment (\(name))" }
-        if !(load().apiKey ?? "").isEmpty { return file.path }
-        return nil
+        if let found = environmentKey(environment) { return "environment (\(found.name))" }
+        return fileKey(environment) == nil ? nil : file(environment: environment).path
     }
 
     /// The model to run: the one asked for, else the config's, else the default.
-    public static func model(requested: String?) -> String {
+    public static func model(requested: String?, environment: [String: String] = ProcessInfo.processInfo.environment) -> String {
         if let requested, !requested.isEmpty { return requested }
-        if let configured = load().model, !configured.isEmpty { return configured }
+        if let configured = load(environment: environment).model, !configured.isEmpty { return configured }
         return defaultModel
     }
 }
