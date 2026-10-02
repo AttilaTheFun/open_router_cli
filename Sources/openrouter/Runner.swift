@@ -26,6 +26,9 @@ actor Conversation {
     private var client: OpenRouterClient
     /// How many of the conversation's messages the log already has.
     private var logged: Int
+    /// The ids the agent gave this run's assistant messages, by their
+    /// place in the history: the ids their lines in the log get.
+    private var messageIDs: [Int: String] = [:]
 
     static let systemPrompt = """
         You are openrouter, a coding agent working in the folder %CWD% on the user's computer. \
@@ -109,7 +112,8 @@ actor Conversation {
             try await agent.send(text) { event in
                 await sink(event)
                 switch event {
-                case .started, .assistant, .toolResult: await self.save()
+                case .assistant(_, let id): await self.save(naming: id)
+                case .started, .toolResult: await self.save()
                 case .delta, .toolCall, .message, .usage: break
                 }
             }
@@ -120,13 +124,21 @@ actor Conversation {
         await save()
     }
 
-    private func save() async {
+    /// - Parameter latest: the id of the assistant message that has just
+    ///   landed, the last in the history.
+    private func save(naming latest: String? = nil) async {
         let history = await agent.history
+        if let latest { messageIDs[history.count - 1] = latest }
         session.messages = history
         try? store.save(session)
         // The log takes what it does not have yet; a session from before
-        // the log gets its whole history the first time.
-        if history.count > logged, (try? store.appendLog(id: session.id, Array(history[logged...]))) != nil {
+        // the log gets its whole history the first time. An assistant
+        // message's line gets the message's id, the one it streamed under.
+        guard history.count > logged else { return }
+        let ids = Dictionary(uniqueKeysWithValues: (logged..<history.count).compactMap { place in
+            messageIDs[place].map { (place - logged, $0) }
+        })
+        if (try? store.appendLog(id: session.id, Array(history[logged...]), ids: ids)) != nil {
             logged = history.count
         }
     }
@@ -159,14 +171,15 @@ final class Output: Sendable {
     }
 }
 
-/// A turn's events as stream-json lines: the ids, the message boundaries,
-/// the usage that goes on the finished message.
+/// A turn's events as stream-json lines: the message boundaries, and the
+/// usage that goes on the finished message. A message's lines carry the
+/// id the agent gave it.
 actor StreamJSONTurn {
     private let model: String
     private let output: Output
-    private var counter = 0
-    private var messageID = ""
-    private var started = false
+    /// The message whose `message_start` has been written and whose
+    /// `assistant` line has not.
+    private var open: String?
     private var usage: (prompt: Int, completion: Int)?
     /// The text of the last assistant message: what the result carries.
     private(set) var lastText = ""
@@ -176,30 +189,24 @@ actor StreamJSONTurn {
         self.output = output
     }
 
-    private func nextID() -> String {
-        counter += 1
-        return "msg_or_" + String(UUID().uuidString.prefix(8)).lowercased() + "_\(counter)"
-    }
-
-    private func startMessage() {
-        guard !started else { return }
-        messageID = nextID()
-        started = true
-        output.line(StreamJSON.messageStart(id: messageID))
+    private func start(_ id: String) {
+        guard open != id else { return }
+        open = id
+        output.line(StreamJSON.messageStart(id: id))
     }
 
     func handle(_ event: ORAgentEvent) {
         switch event {
-        case .delta(let text):
-            startMessage()
+        case .delta(let text, let id):
+            start(id)
             output.line(StreamJSON.textDelta(text))
         case .usage(let prompt, let completion):
             usage = (prompt, completion)
-        case .assistant(let message):
-            startMessage()
-            output.line(StreamJSON.assistant(id: messageID, model: model, message: message, usage: usage))
+        case .assistant(let message, let id):
+            start(id)
+            output.line(StreamJSON.assistant(id: id, model: model, message: message, usage: usage))
             if let text = message.content, !text.isEmpty { lastText = text }
-            started = false
+            open = nil
             usage = nil
         case .toolResult(_, let result, let id, let isError):
             output.line(StreamJSON.toolResult(callID: id, output: result, isError: isError))
@@ -262,7 +269,7 @@ actor HeadlessRunner {
             try await conversation.run(text) { [streamOut, output] event in
                 if streamOut {
                     await lines.handle(event)
-                } else if case .delta(let piece) = event {
+                } else if case .delta(let piece, _) = event {
                     output.text(piece)
                 }
             }

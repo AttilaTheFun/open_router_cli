@@ -40,6 +40,43 @@ import TestSupport
     #expect(decoded[1].message.toolCalls?.first?.function.name == "bash")
 }
 
+/// A line's id is the one given for its message, where one is; a line
+/// with none given gets one of its own.
+@Test func aLogLineTakesTheIdGivenForItsMessage() throws {
+    let store = ORSessionStore(directory: try scratch().appendingPathComponent("sessions"))
+    let id = ORSession.newID()
+    let messages = [ORMessage(role: .user, content: "hi"), ORMessage(role: .assistant, content: "hello"), ORMessage(role: .user, content: "more")]
+    try store.appendLog(id: id, messages, ids: [1: "msg_or_given"])
+    let lines = try String(contentsOf: store.logURL(for: id), encoding: .utf8).split(separator: "\n")
+    let decoded = try lines.map { try JSONDecoder().decode(ORLogLine.self, from: Data($0.utf8)) }
+    #expect(decoded.map(\.message) == messages)
+    #expect(decoded[1].id == "msg_or_given")
+    #expect(Set(decoded.map(\.id)).count == 3)
+    #expect(UUID(uuidString: decoded[0].id) != nil)
+    #expect(UUID(uuidString: decoded[2].id) != nil)
+}
+
+/// A log written before lines took their messages' ids (every id a UUID)
+/// is read, counted and added to as it always was.
+@Test func anOlderLogIsReadAndAddedTo() throws {
+    let store = ORSessionStore(directory: try scratch().appendingPathComponent("sessions"))
+    let id = "older"
+    try FileManager.default.createDirectory(at: store.directory, withIntermediateDirectories: true)
+    let older = """
+        {"id":"3b1f0c7e-58a1-4d0e-9d0a-2f4f6f1f8a01","message":{"content":"hi","role":"user"},"timestamp":"2026-09-26T20:00:00Z"}
+        {"id":"9c2e7a55-0d6b-4b53-8a3e-7a1d5c0e4b02","message":{"content":"hello","role":"assistant"},"timestamp":"2026-09-26T20:00:01Z"}
+
+        """
+    try Data(older.utf8).write(to: store.logURL(for: id))
+    #expect(store.loggedCount(id: id) == 2)
+    try store.appendLog(id: id, [ORMessage(role: .assistant, content: "again")], ids: [0: "msg_or_new"])
+    let text = try String(contentsOf: store.logURL(for: id), encoding: .utf8)
+    #expect(text.hasPrefix(older))
+    let decoded = try text.split(separator: "\n").map { try JSONDecoder().decode(ORLogLine.self, from: Data($0.utf8)) }
+    #expect(decoded.map(\.id) == ["3b1f0c7e-58a1-4d0e-9d0a-2f4f6f1f8a01", "9c2e7a55-0d6b-4b53-8a3e-7a1d5c0e4b02", "msg_or_new"])
+    #expect(decoded.map(\.message.content) == ["hi", "hello", "again"])
+}
+
 // MARK: Config
 
 @Test func keyComesFromTheEnvironmentFirst() {
@@ -136,7 +173,7 @@ import TestSupport
     let order: [String] = await recorder.events.compactMap { event in
         switch event {
         case .started: "started"
-        case .assistant(let message): "assistant:\(message.content ?? "")/\(message.toolCalls?.count ?? 0)"
+        case .assistant(let message, _): "assistant:\(message.content ?? "")/\(message.toolCalls?.count ?? 0)"
         case .toolCall(let name, _, _): "call:" + name
         case .toolResult(let name, _, _, _): "result:" + name
         case .delta, .message, .usage: nil
@@ -144,6 +181,47 @@ import TestSupport
     }
     #expect(order == ["started", "assistant:Looking. /1", "call:echo", "result:echo", "assistant:done/0"])
     #expect(await agent.history.map(\.role) == [.user, .assistant, .tool, .assistant])
+}
+
+/// Each assistant message has an id of its own: its deltas carry it, and
+/// the finished message has the same one.
+@Test func aMessagesDeltasCarryTheIdItFinishesWith() async throws {
+    let mock = MockTransport(streams: [
+        [
+            try sse(["choices": [["delta": ["content": "Look"]]]]),
+            try sse(["choices": [["delta": ["content": "ing."]]]]),
+            try sse(["choices": [["delta": ["tool_calls": [["index": 0, "id": "call_1", "function": ["name": "echo", "arguments": "{}"]]]]]]]),
+            try sse(["choices": [["delta": [String: Any](), "finish_reason": "tool_calls"]]]),
+            "data: [DONE]",
+        ],
+        try reply("done"),
+        try toolCalls([("call_2", "echo", [:])]),
+        try reply("really done"),
+    ])
+    let agent = ORAgent(client: OpenRouterClient(apiKey: "k", transport: mock), model: "m", tools: [EchoTool()])
+    let recorder = Recorder()
+    try await agent.send("go") { await recorder.add($0) }
+    try await agent.send("again") { await recorder.add($0) }
+    // Each message's ids, in the order its events came: deltas, then the message whole.
+    var ids: [[String]] = [[]]
+    for event in await recorder.events {
+        switch event {
+        case .delta(_, let id): ids[ids.count - 1].append(id)
+        case .assistant(_, let id):
+            ids[ids.count - 1].append(id)
+            ids.append([])
+        case .started, .toolCall, .toolResult, .message, .usage: break
+        }
+    }
+    ids.removeLast()
+    // Two deltas and the message; one delta and the message; a message
+    // with no text, so no deltas; one delta and the message.
+    #expect(ids.map(\.count) == [3, 2, 1, 2])
+    let each = ids.map { Set($0) }
+    #expect(each.allSatisfy { $0.count == 1 })
+    let all = each.flatMap { $0 }
+    #expect(Set(all).count == 4)
+    #expect(all.allSatisfy { $0.hasPrefix("msg_or_") && $0.count == 39 })
 }
 
 /// Resuming: the history given at the start is in the conversation, after

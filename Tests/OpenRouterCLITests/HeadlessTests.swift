@@ -196,3 +196,89 @@ private func toolResult(_ line: [String: Any]) throws -> [String: Any] {
     let named = try Conversation(resume: nil, sessionID: "named-by-the-host", cwd: base.path, model: "m", effort: nil, store: store)
     #expect(named.id == "named-by-the-host")
 }
+
+/// The ids of the assistant messages a run printed: `message_start`'s and
+/// `assistant`'s, in the order they came.
+private func streamedIDs(_ lines: [[String: Any]]) -> (started: [String], finished: [String]) {
+    var started: [String] = []
+    var finished: [String] = []
+    for line in lines {
+        if line["type"] as? String == "assistant", let id = (line["message"] as? [String: Any])?["id"] as? String { finished.append(id) }
+        if let event = line["event"] as? [String: Any], event["type"] as? String == "message_start",
+           let id = (event["message"] as? [String: Any])?["id"] as? String { started.append(id) }
+    }
+    return (started, finished)
+}
+
+private func logLines(_ rig: Rig) throws -> [ORLogLine] {
+    try String(contentsOf: try rig.store.logURL(for: rig.conversation.id), encoding: .utf8)
+        .split(separator: "\n").map { try JSONDecoder().decode(ORLogLine.self, from: Data($0.utf8)) }
+}
+
+/// An assistant message is in the log under the id it streamed under: a
+/// host that followed the stream finds each message on record by that id.
+@Test(.timeLimit(.minutes(1))) func anAssistantMessageIsLoggedUnderTheIdItStreamedUnder() async throws {
+    let rig = try Rig(streams: [
+        [
+            try sse(["choices": [["delta": ["content": "Looking."]]]]),
+            try sse(["choices": [["delta": ["tool_calls": [["index": 0, "id": "call_1", "function": ["name": "list_directory", "arguments": "{}"]]]]]]]),
+            try sse(["choices": [["delta": [String: Any](), "finish_reason": "tool_calls"]]]),
+            "data: [DONE]",
+        ],
+        try toolCalls([("call_2", "list_directory", [:])]),
+        try reply("Nothing here."),
+        try reply("Still nothing."),
+    ])
+    #expect(await rig.runner.turn("what is here?"))
+    #expect(await rig.runner.turn("and now?"))
+    let ids = streamedIDs(try objects(try rig.written().out))
+    // Four assistant messages, each started and finished under one id, all different.
+    #expect(ids.finished.count == 4)
+    #expect(ids.started == ids.finished)
+    #expect(Set(ids.finished).count == 4)
+
+    let log = try logLines(rig)
+    #expect(log.map(\.message.role) == [.user, .assistant, .tool, .assistant, .tool, .assistant, .user, .assistant])
+    // The assistant lines have the streamed ids, in order.
+    #expect(log.filter { $0.message.role == .assistant }.map(\.id) == ids.finished)
+    // The other lines have ids of their own, and no id is used twice.
+    #expect(Set(log.map(\.id)).count == log.count)
+    #expect(log.filter { $0.message.role != .assistant }.allSatisfy { UUID(uuidString: $0.id) != nil })
+    // A tool call is one id throughout: the call's, and its answer's.
+    #expect(log[1].message.toolCalls?.map(\.id) == ["call_1"])
+    #expect(log[2].message.toolCallID == "call_1")
+}
+
+/// The log's ids do not depend on stream-json being asked for: in text
+/// mode an assistant message's line still has the agent's id for it.
+@Test(.timeLimit(.minutes(1))) func textModeLogsAssistantMessagesUnderTheirIdsToo() async throws {
+    let rig = try Rig(streams: [try reply("plain")], streamOut: false)
+    #expect(await rig.runner.turn("hi"))
+    let log = try logLines(rig)
+    #expect(log.map(\.message.role) == [.user, .assistant])
+    #expect(log[1].id.hasPrefix("msg_or_"))
+    #expect(UUID(uuidString: log[0].id) != nil)
+}
+
+/// A session resumed in a new process: what the earlier run logged stays
+/// as it is, and the new run's assistant message has its streamed id.
+@Test(.timeLimit(.minutes(1))) func aResumedSessionKeepsItsLogAndAddsToIt() async throws {
+    let first = try Rig(streams: [try reply("one")])
+    #expect(await first.runner.turn("first"))
+    let before = try logLines(first)
+
+    let mock = MockTransport(streams: [try reply("two")])
+    let out = Pipe()
+    let resumed = try Conversation(resume: first.conversation.id, sessionID: nil, cwd: first.cwd.path, model: nil, effort: nil,
+                                   store: first.store, makeClient: { OpenRouterClient(apiKey: "k", transport: mock) })
+    let runner = HeadlessRunner(conversation: resumed, streamOut: true, output: Output(out: out.fileHandleForWriting, err: .nullDevice))
+    #expect(await runner.turn("second"))
+    try out.fileHandleForWriting.close()
+    let ids = streamedIDs(try objects(String(decoding: try out.fileHandleForReading.readToEnd() ?? Data(), as: UTF8.self)))
+
+    let after = try logLines(first)
+    #expect(Array(after.prefix(2)) == before)
+    #expect(after.map(\.message.content) == ["first", "one", "second", "two"])
+    #expect(ids.finished.count == 1)
+    #expect(after[3].id == ids.finished.first)
+}

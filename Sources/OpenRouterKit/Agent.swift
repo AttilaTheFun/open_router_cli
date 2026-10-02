@@ -9,8 +9,9 @@ import Foundation
 public enum ORAgentEvent: Sendable {
     /// The turn has begun: the user's message is in the conversation.
     case started
-    /// More assistant text.
-    case delta(String)
+    /// More assistant text, and the id of the message it belongs to: the
+    /// one `assistant` gives when that message is whole.
+    case delta(String, messageID: String)
     /// The model asked to run a tool.
     case toolCall(name: String, arguments: String, id: String)
     /// A tool call was answered: the output (what the model sees next),
@@ -22,8 +23,11 @@ public enum ORAgentEvent: Sendable {
     case message(String)
     /// One completion finished: the assistant message whole, its text and
     /// the tool calls it asked for, before any of them runs. What a
-    /// consumer that shows the calls beside the words wants.
-    case assistant(ORMessage)
+    /// consumer that shows the calls beside the words wants. The id is
+    /// the message's own, the agent's: its deltas carried it, and a
+    /// consumer that keeps the message keeps it under it, so whoever
+    /// watched the message stream finds it on record by the same name.
+    case assistant(ORMessage, id: String)
     /// The context so far, when reported.
     case usage(prompt: Int, completion: Int)
 }
@@ -88,6 +92,11 @@ public actor ORAgent {
         messages = (systemPrompt.map { [ORMessage(role: .system, content: $0)] } ?? []) + history
     }
 
+    /// An id for an assistant message: "msg_or_" and 32 hex digits.
+    static func newMessageID() -> String {
+        "msg_or_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+    }
+
     /// The conversation without the system prompt: what a session on
     /// disk keeps, and what `init(history:)` takes back.
     public var history: [ORMessage] { messages.filter { $0.role != .system } }
@@ -136,10 +145,11 @@ public actor ORAgent {
             try Task.checkCancellation()
             let request = ORChatRequest(model: model, messages: ORMessage.answeringEveryToolCall(messages), tools: tools,
                                         temperature: temperature, reasoningEffort: reasoningEffort)
+            let messageID = Self.newMessageID()
             var finished: (reason: String?, message: ORMessage)?
             for try await event in client.stream(request) {
                 switch event {
-                case .token(let text): await onEvent(.delta(text))
+                case .token(let text): await onEvent(.delta(text, messageID: messageID))
                 case .usage(let prompt, let completion): await onEvent(.usage(prompt: prompt, completion: completion))
                 case .toolCall: break // gathered into the finished message
                 case .finished(let reason, let message): finished = (reason, message)
@@ -161,7 +171,7 @@ public actor ORAgent {
             let calls = message.toolCalls ?? []
             if !text.isEmpty || !calls.isEmpty {
                 messages.append(message)
-                await onEvent(.assistant(message))
+                await onEvent(.assistant(message, id: messageID))
                 if !text.isEmpty { await onEvent(.message(text)) }
             }
             if let cutOff { throw ORAgentError.replyCutOff(reason: cutOff) }
