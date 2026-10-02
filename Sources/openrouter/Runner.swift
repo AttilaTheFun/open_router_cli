@@ -285,8 +285,9 @@ actor HeadlessRunner {
 
     /// Takes one line of stream-json input: a user message is queued, a
     /// control request is carried out or refused, and answered either
-    /// way. A line that is neither (not JSON, or of a type openrouter has
-    /// no use for) is passed over.
+    /// way. A JSON line of a type openrouter has no use for is passed
+    /// over; a line that is not JSON is passed over too, and said to
+    /// have been, since whoever wrote it is waiting on it.
     func take(line: String) {
         switch StreamJSON.parse(line) {
         case .user(let text):
@@ -297,7 +298,10 @@ actor HeadlessRunner {
         case .control(let requestID, let subtype):
             if streamOut { output.line(StreamJSON.controlError(requestID: requestID, error: "openrouter does not take the control request \"\(subtype)\"")) }
         case nil:
-            break
+            let isBlank = line.allSatisfy(\.isWhitespace)
+            if !isBlank, (try? JSONSerialization.jsonObject(with: Data(line.utf8))) == nil {
+                output.error("openrouter: a line on stdin is not JSON, and was passed over (\(line.utf8.count) bytes)")
+            }
         }
     }
 
