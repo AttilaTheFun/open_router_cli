@@ -5,8 +5,10 @@
 
 import Foundation
 
-/// What the agent emits as a turn runs.
+/// What the agent reports as a turn runs.
 public enum ORAgentEvent: Sendable {
+    /// The turn has begun: the user's message is in the conversation.
+    case started
     /// More assistant text.
     case delta(String)
     /// The model asked to run a tool.
@@ -20,97 +22,108 @@ public enum ORAgentEvent: Sendable {
     /// the tool calls it asked for, before any of them runs. What a
     /// consumer that shows the calls beside the words wants.
     case assistant(ORMessage)
-    /// The turn is done — the model replied without calling a tool.
-    case done
     /// The context so far, when reported.
     case usage(prompt: Int, completion: Int)
 }
 
-/// A conversation with a model and a set of tools. Not an actor: callers
-/// drive one turn at a time and hold their own concurrency.
-public final class ORAgent: @unchecked Sendable {
-    public let client: OpenRouterClient
-    public var model: String
-    public var temperature: Double?
+public enum ORAgentError: LocalizedError, Equatable {
+    /// `send` was called while a turn was still running.
+    case turnInProgress
+
+    public var errorDescription: String? {
+        switch self {
+        case .turnInProgress: "A turn is already running in this conversation."
+        }
+    }
+}
+
+/// A conversation with a model and a set of tools. An actor: the
+/// conversation is its state, and a turn is one call on it, which returns
+/// when the turn is over. One turn runs at a time.
+public actor ORAgent {
+    public private(set) var client: OpenRouterClient
+    public private(set) var model: String
+    public let temperature: Double?
     /// The reasoning effort asked of the model, when one is.
-    public var reasoningEffort: String?
+    public let reasoningEffort: String?
+    /// How many tool rounds a single turn may take before it gives up.
+    public let maxRounds: Int
     private let tools: [any ORTool]
     private let toolsByName: [String: any ORTool]
     /// The whole conversation, growing with each turn; the source of
     /// truth a consumer can read or persist.
     public private(set) var messages: [ORMessage]
-    /// How many tool rounds a single turn may take before it gives up.
-    public var maxRounds = 24
+    /// A turn suspends (on the model, on a tool), and the actor takes
+    /// other calls meanwhile; a second turn among them would interleave
+    /// its messages with the first's.
+    private var isRunning = false
 
-    public init(client: OpenRouterClient, model: String, tools: [any ORTool] = [],
-                systemPrompt: String? = nil, temperature: Double? = nil, reasoningEffort: String? = nil) {
+    /// - Parameter history: messages already had (resuming a conversation),
+    ///   without the system prompt: what `history` gives back.
+    public init(client: OpenRouterClient, model: String, tools: [any ORTool] = [], systemPrompt: String? = nil,
+                history: [ORMessage] = [], temperature: Double? = nil, reasoningEffort: String? = nil, maxRounds: Int = 24) {
         self.client = client
         self.model = model
         self.tools = tools
         self.temperature = temperature
         self.reasoningEffort = reasoningEffort
+        self.maxRounds = maxRounds
         toolsByName = Dictionary(tools.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
-        messages = systemPrompt.map { [ORMessage(role: .system, content: $0)] } ?? []
+        messages = (systemPrompt.map { [ORMessage(role: .system, content: $0)] } ?? []) + history
     }
-
-    /// Adds any messages already had (resuming a conversation).
-    public func load(_ history: [ORMessage]) { messages.append(contentsOf: history) }
 
     /// The conversation without the system prompt: what a session on
-    /// disk keeps, and what `load` takes back.
+    /// disk keeps, and what `init(history:)` takes back.
     public var history: [ORMessage] { messages.filter { $0.role != .system } }
 
-    /// Runs a user turn to completion, streaming events. Appends every
-    /// message (user, assistant, tool results) to `messages` as it goes.
-    public func send(_ userText: String) -> AsyncThrowingStream<ORAgentEvent, Error> {
-        messages.append(ORMessage(role: .user, content: userText))
-        return AsyncThrowingStream { continuation in
-            let task = Task { await self.run(continuation) }
-            continuation.onTermination = { _ in task.cancel() }
-        }
-    }
+    /// The model the next completion is asked of.
+    public func setModel(_ model: String) { self.model = model }
 
-    private func run(_ continuation: AsyncThrowingStream<ORAgentEvent, Error>.Continuation) async {
-        do {
-            for _ in 0..<maxRounds {
-                if Task.isCancelled { continuation.finish(); return }
-                let request = ORChatRequest(model: model, messages: messages, tools: tools, temperature: temperature,
-                                            reasoningEffort: reasoningEffort)
-                var finished: ORMessage?
-                for try await event in client.stream(request) {
-                    switch event {
-                    case .token(let text): continuation.yield(.delta(text))
-                    case .usage(let prompt, let completion): continuation.yield(.usage(prompt: prompt, completion: completion))
-                    case .toolCall: break // gathered into the finished message
-                    case .finished(_, let message): finished = message
-                    }
-                }
-                guard let message = finished else { continuation.finish(); return }
-                messages.append(message)
-                continuation.yield(.assistant(message))
-                if let text = message.content, !text.isEmpty { continuation.yield(.message(text)) }
-                guard let calls = message.toolCalls, !calls.isEmpty else {
-                    continuation.yield(.done)
-                    continuation.finish()
-                    return
-                }
-                for call in calls {
-                    continuation.yield(.toolCall(name: call.function.name, arguments: call.function.arguments, id: call.id))
-                    let output: String
-                    if let tool = toolsByName[call.function.name] {
-                        do { output = try await tool.call(arguments: call.function.arguments) }
-                        catch { output = "Error: \(error.localizedDescription)" }
-                    } else {
-                        output = "Error: no tool named \(call.function.name)"
-                    }
-                    continuation.yield(.toolResult(name: call.function.name, output: output, id: call.id))
-                    messages.append(ORMessage(role: .tool, content: output, toolCallID: call.id, name: call.function.name))
+    /// The client the next completion goes through (a new key).
+    public func setClient(_ client: OpenRouterClient) { self.client = client }
+
+    /// Runs a user turn to completion, reporting events as it goes, and
+    /// returns when the model has replied without calling a tool. Appends
+    /// every message (user, assistant, tool results) to `messages` as it
+    /// lands. Each event is awaited: the turn goes on when `onEvent`
+    /// returns, so a consumer sees them in order and can read `history`
+    /// from inside it.
+    public func send(_ userText: String, onEvent: @Sendable (ORAgentEvent) async -> Void) async throws {
+        guard !isRunning else { throw ORAgentError.turnInProgress }
+        isRunning = true
+        defer { isRunning = false }
+        messages.append(ORMessage(role: .user, content: userText))
+        await onEvent(.started)
+        for _ in 0..<maxRounds {
+            if Task.isCancelled { return }
+            let request = ORChatRequest(model: model, messages: messages, tools: tools, temperature: temperature,
+                                        reasoningEffort: reasoningEffort)
+            var finished: ORMessage?
+            for try await event in client.stream(request) {
+                switch event {
+                case .token(let text): await onEvent(.delta(text))
+                case .usage(let prompt, let completion): await onEvent(.usage(prompt: prompt, completion: completion))
+                case .toolCall: break // gathered into the finished message
+                case .finished(_, let message): finished = message
                 }
             }
-            continuation.yield(.done)
-            continuation.finish()
-        } catch {
-            continuation.finish(throwing: error)
+            guard let message = finished else { return }
+            messages.append(message)
+            await onEvent(.assistant(message))
+            if let text = message.content, !text.isEmpty { await onEvent(.message(text)) }
+            guard let calls = message.toolCalls, !calls.isEmpty else { return }
+            for call in calls {
+                await onEvent(.toolCall(name: call.function.name, arguments: call.function.arguments, id: call.id))
+                let output: String
+                if let tool = toolsByName[call.function.name] {
+                    do { output = try await tool.call(arguments: call.function.arguments) }
+                    catch { output = "Error: \(error.localizedDescription)" }
+                } else {
+                    output = "Error: no tool named \(call.function.name)"
+                }
+                messages.append(ORMessage(role: .tool, content: output, toolCallID: call.id, name: call.function.name))
+                await onEvent(.toolResult(name: call.function.name, output: output, id: call.id))
+            }
         }
     }
 }

@@ -2,16 +2,10 @@ import Foundation
 import Testing
 @testable import OpenRouterKit
 
-private func scratch() -> URL {
-    let url = FileManager.default.temporaryDirectory.appendingPathComponent("openrouterkit-" + UUID().uuidString, isDirectory: true)
-    try! FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-    return url
-}
-
 // MARK: Sessions
 
 @Test func sessionRoundTripsAndListsNewestFirst() throws {
-    let store = ORSessionStore(directory: scratch().appendingPathComponent("sessions"))
+    let store = ORSessionStore(directory: try scratch().appendingPathComponent("sessions"))
     var older = ORSession(cwd: "/tmp/a", model: "m", messages: [ORMessage(role: .user, content: "first question\nmore")])
     older.updated = 100
     try store.save(older)
@@ -30,7 +24,7 @@ private func scratch() -> URL {
 }
 
 @Test func theLogIsOnlyAppendedTo() throws {
-    let store = ORSessionStore(directory: scratch().appendingPathComponent("sessions"))
+    let store = ORSessionStore(directory: try scratch().appendingPathComponent("sessions"))
     let id = ORSession.newID()
     #expect(store.loggedCount(id: id) == 0)
     try store.appendLog(id: id, [ORMessage(role: .user, content: "Add a README")])
@@ -66,7 +60,7 @@ private func scratch() -> URL {
 // MARK: Tools
 
 @Test func toolsReadWriteEditAndList() async throws {
-    let root = scratch()
+    let root = try scratch()
     let tools = CodingTools.standard(cwd: root.path)
     func tool(_ name: String) -> any ORTool { tools.first { $0.name == name }! }
     _ = try await tool("write_file").call(arguments: "{\"path\":\"src/a.txt\",\"content\":\"one\\ntwo\\nthree\"}")
@@ -126,32 +120,39 @@ private func scratch() -> URL {
 }
 
 @Test func agentAnnouncesTheWholeAssistantMessageBeforeRunningTools() async throws {
-    let mock = MockTransport()
-    mock.streams = [
+    let mock = MockTransport(streams: [
         [
-            sse(["choices": [["delta": ["content": "Looking. "]]]]),
-            sse(["choices": [["delta": ["tool_calls": [["index": 0, "id": "call_1", "function": ["name": "echo", "arguments": "{\"text\":\"hi\"}"]]]]]]]),
-            sse(["choices": [["delta": [:], "finish_reason": "tool_calls"]]]),
+            try sse(["choices": [["delta": ["content": "Looking. "]]]]),
+            try sse(["choices": [["delta": ["tool_calls": [["index": 0, "id": "call_1", "function": ["name": "echo", "arguments": "{\"text\":\"hi\"}"]]]]]]]),
+            try sse(["choices": [["delta": [:], "finish_reason": "tool_calls"]]]),
             "data: [DONE]",
         ],
-        [sse(["choices": [["delta": ["content": "done"], "finish_reason": "stop"]]]), "data: [DONE]"],
-    ]
+        [try sse(["choices": [["delta": ["content": "done"], "finish_reason": "stop"]]]), "data: [DONE]"],
+    ])
     let agent = ORAgent(client: OpenRouterClient(apiKey: "k", transport: mock), model: "m", tools: [EchoTool()])
-    var order: [String] = []
-    for try await event in agent.send("go") {
+    let recorder = Recorder()
+    try await agent.send("go") { await recorder.add($0) }
+    let order: [String] = await recorder.events.compactMap { event in
         switch event {
-        case .assistant(let message): order.append("assistant:\(message.content ?? "")/\(message.toolCalls?.count ?? 0)")
-        case .toolCall(let name, _, _): order.append("call:" + name)
-        case .toolResult(let name, _, _): order.append("result:" + name)
-        case .done: order.append("done")
-        default: break
+        case .started: "started"
+        case .assistant(let message): "assistant:\(message.content ?? "")/\(message.toolCalls?.count ?? 0)"
+        case .toolCall(let name, _, _): "call:" + name
+        case .toolResult(let name, _, _): "result:" + name
+        case .delta, .message, .usage: nil
         }
     }
-    #expect(order == ["assistant:Looking. /1", "call:echo", "result:echo", "assistant:done/0", "done"])
-    #expect(agent.history.count == 4)
-    #expect(agent.history.first?.role == .user)
+    #expect(order == ["started", "assistant:Looking. /1", "call:echo", "result:echo", "assistant:done/0"])
+    #expect(await agent.history.map(\.role) == [.user, .assistant, .tool, .assistant])
 }
 
-private func sse(_ object: [String: Any]) -> String {
-    "data: " + String(data: try! JSONSerialization.data(withJSONObject: object), encoding: .utf8)!
+/// Resuming: the history given at the start is in the conversation, after
+/// the system prompt, and `history` gives it back without the prompt.
+@Test func agentStartsFromAHistory() async throws {
+    let mock = MockTransport(streams: [[try sse(["choices": [["delta": ["content": "again"], "finish_reason": "stop"]]]), "data: [DONE]"]])
+    let earlier = [ORMessage(role: .user, content: "before"), ORMessage(role: .assistant, content: "yes")]
+    let agent = ORAgent(client: OpenRouterClient(apiKey: "k", transport: mock), model: "m", systemPrompt: "sys", history: earlier)
+    #expect(await agent.history == earlier)
+    try await agent.send("and now") { _ in }
+    #expect(await agent.messages.map(\.content) == ["sys", "before", "yes", "and now", "again"])
+    #expect(await agent.history.map(\.content) == ["before", "yes", "and now", "again"])
 }
