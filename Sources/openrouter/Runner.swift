@@ -58,9 +58,10 @@ actor Conversation {
     ///     as it is then.
     init(resume: String?, sessionID: String?, cwd chosen: String?, model requested: String?, effort: String?, maxRounds: Int?,
          store: ORSessionStore = ORSessionStore(), makeClient: @escaping @Sendable () -> OpenRouterClient = { OpenRouterClient() }) throws {
-        // The folder as an absolute path: it is kept in the session, read
-        // by hosts, and has to mean the same from anywhere.
-        let folder = chosen.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath).standardizedFileURL.path }
+        // The folder in one spelling (`ORSession.folder`): it is kept in
+        // the session, read by hosts, and has to mean the same from
+        // anywhere.
+        let folder = chosen.map(ORSession.folder)
         var session: ORSession
         if let resume {
             session = try store.load(id: resume)
@@ -72,7 +73,8 @@ actor Conversation {
             // fail at the first save, and one a session already has would
             // write a new, empty session over it.
             guard !(try store.exists(id: id)) else { throw ORSessionError.alreadyExists(id) }
-            session = ORSession(id: id, cwd: folder ?? FileManager.default.currentDirectoryPath, model: ORConfig.model(requested: requested))
+            session = ORSession(id: id, cwd: folder ?? ORSession.folder(FileManager.default.currentDirectoryPath),
+                                model: ORConfig.model(requested: requested))
         }
         let client = makeClient()
         self.store = store
@@ -152,7 +154,7 @@ actor Conversation {
     }
 
     /// Why the last save failed, when it did.
-    private var unsaved: String?
+    private(set) var unsaved: String?
 
     /// Writes the session file and adds to the log what it does not have
     /// yet. A failure is kept in `unsaved` for the turn to report: an
@@ -178,6 +180,32 @@ actor Conversation {
             unsaved = nil
         } catch {
             unsaved = error.localizedDescription
+        }
+    }
+}
+
+/// What a line typed at the chat's prompt is.
+enum ChatInput: Equatable {
+    /// Nothing but white space.
+    case nothing
+    /// `/model`: alone, asks which model is in use; with an id, changes it.
+    case model(String?)
+    /// `/quit` or `/exit`.
+    case quit
+    /// Anything else: a turn.
+    case prompt(String)
+
+    init(_ entered: String) {
+        let text = entered.trimmingCharacters(in: .whitespaces)
+        if text.isEmpty {
+            self = .nothing
+        } else if text == "/quit" || text == "/exit" {
+            self = .quit
+        } else if text == "/model" || text.hasPrefix("/model ") {
+            let id = text.dropFirst(6).trimmingCharacters(in: .whitespaces)
+            self = .model(id.isEmpty ? nil : id)
+        } else {
+            self = .prompt(text)
         }
     }
 }
@@ -356,7 +384,11 @@ actor HeadlessRunner {
             if let lines { output.line(StreamJSON.result(.success, text: await lines.lastText, sessionID: id)) } else { output.text("\n") }
             return true
         } catch {
-            let message = error is CancellationError ? "Interrupted" : (error as? LocalizedError)?.errorDescription ?? "\(error)"
+            var message = error is CancellationError ? "Interrupted" : error.localizedDescription
+            // A turn that failed and could not be saved either: both are said.
+            if !(error is Conversation.NotSaved), let reason = await conversation.unsaved {
+                message += " " + Conversation.NotSaved(reason: reason).localizedDescription
+            }
             // Out of rounds is the one failure Claude Code names apart.
             let kind: StreamJSON.ResultKind = if case ORAgentError.tooManyRounds = error { .errorMaxTurns } else { .errorDuringExecution }
             if streamOut { output.line(StreamJSON.result(kind, text: message, sessionID: id)) } else { output.error(message) }

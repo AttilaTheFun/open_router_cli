@@ -34,6 +34,16 @@ public struct ORSession: Codable, Sendable, Identifiable, Equatable {
     /// A lowercase UUID, the shape Claude's and Codex's session ids have.
     public static func newID() -> String { UUID().uuidString.lowercased() }
 
+    /// A folder as a session keeps it and is looked up by: absolute, with
+    /// `~`, `.`, `..` and symbolic links followed — the path the system
+    /// gives a folder when it is the current one — so that a folder is
+    /// the same string however it was named. (A path through a loop of
+    /// links names no folder, and is left as it was given.)
+    public static func folder(_ path: String) -> String {
+        let names = CodingTools.components(URL(fileURLWithPath: (path as NSString).expandingTildeInPath).path)
+        return "/" + ((try? CodingTools.canonical(names)) ?? names).joined(separator: "/")
+    }
+
     /// The first thing the user said, shortened: what a list calls it.
     public var title: String {
         let first = messages.first { $0.role == .user }?.content ?? ""
@@ -140,14 +150,15 @@ public struct ORSessionStore: Sendable {
         try handle.write(contentsOf: data)
     }
 
-    /// Every session, newest first; only those run in `cwd` when given.
+    /// Every session, newest first; only those run in `cwd` when given,
+    /// however that folder, or the session's, was spelled.
     public func list(cwd: String? = nil) -> [ORSession] {
         guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return [] }
-        let wanted = cwd.map { ($0 as NSString).expandingTildeInPath }
+        let wanted = cwd.map(ORSession.folder)
         var sessions: [ORSession] = []
         for name in names where name.hasSuffix(".json") {
             guard let session = try? load(id: String(name.dropLast(5))) else { continue }
-            if let wanted, (session.cwd as NSString).expandingTildeInPath != wanted { continue }
+            if let wanted, ORSession.folder(session.cwd) != wanted { continue }
             sessions.append(session)
         }
         return sessions.sorted { $0.updated > $1.updated }

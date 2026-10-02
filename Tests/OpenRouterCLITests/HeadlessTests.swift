@@ -19,12 +19,12 @@ private struct Rig {
     private let out = Pipe()
     private let err = Pipe()
 
-    init(streams: [[String]], status: Int = 200, key: String = "k", streamOut: Bool = true, partialMessages: Bool = true,
-         maxRounds: Int? = nil) throws {
-        let mock = MockTransport(streams: streams, status: status)
+    init(streams: [[String]], status: Int = 200, failure: URLError? = nil, key: String = "k", streamOut: Bool = true,
+         partialMessages: Bool = true, maxRounds: Int? = nil, sessions: URL? = nil) throws {
+        let mock = MockTransport(streams: streams, status: status, failure: failure)
         self.mock = mock
         cwd = try scratch()
-        store = ORSessionStore(directory: try scratch().appendingPathComponent("sessions"))
+        store = ORSessionStore(directory: try sessions ?? scratch().appendingPathComponent("sessions"))
         conversation = try Conversation(resume: nil, sessionID: nil, cwd: cwd.path, model: "m", effort: nil, maxRounds: maxRounds, store: store,
                                         makeClient: { OpenRouterClient(apiKey: key, transport: mock) })
         runner = HeadlessRunner(conversation: conversation, streamOut: streamOut, partialMessages: partialMessages,
@@ -227,28 +227,56 @@ private func conversation(resume: String? = nil, sessionID: String? = nil, cwd: 
     let id = rig.conversation.id
     // Not the process's current folder: the session's.
     let resumed = try conversation(resume: id, store: rig.store)
-    #expect(resumed.cwd == rig.cwd.path)
-    #expect(resumed.cwd != FileManager.default.currentDirectoryPath)
+    #expect(resumed.cwd == ORSession.folder(rig.cwd.path))
+    #expect(resumed.cwd != ORSession.folder(FileManager.default.currentDirectoryPath))
 
     let elsewhere = try scratch()
     let moved = try conversation(resume: id, cwd: elsewhere.path, model: nil, store: rig.store, streams: [try reply("two")])
-    #expect(moved.cwd == elsewhere.path)
+    #expect(moved.cwd == ORSession.folder(elsewhere.path))
     try await moved.run("second") { _ in }
     let saved = try rig.store.load(id: id)
-    #expect(saved.cwd == elsewhere.path)
+    #expect(saved.cwd == ORSession.folder(elsewhere.path))
     #expect(saved.model == "m")
     #expect(saved.messages.map(\.content) == ["first", "one", "second", "two"])
 }
 
-/// The folder is kept as an absolute path, whatever was typed.
-@Test func aNewSessionsFolderIsAbsolute() throws {
+/// The folder is kept in one spelling, whatever was typed: absolute, as
+/// the system names it.
+@Test func aNewSessionsFolderIsKeptInOneSpelling() throws {
     let store = ORSessionStore(directory: try scratch().appendingPathComponent("sessions"))
-    let here = FileManager.default.currentDirectoryPath
+    let here = ORSession.folder(FileManager.default.currentDirectoryPath)
+    #expect(here.hasPrefix("/"))
     #expect(try conversation(store: store).cwd == here)
     #expect(try conversation(cwd: ".", store: store).cwd == here)
-    #expect(try conversation(cwd: "sub/../other", store: store).cwd == here + "/other")
-    #expect(try conversation(cwd: "~", store: store).cwd == NSHomeDirectory())
-    #expect(try conversation(cwd: "/tmp/somewhere", store: store).cwd == "/tmp/somewhere")
+    #expect(try conversation(cwd: "sub/../other/", store: store).cwd == here + "/other")
+    #expect(try conversation(cwd: "~", store: store).cwd == ORSession.folder(NSHomeDirectory()))
+    // Through a link, the folder it leads to.
+    let real = try scratch()
+    let link = try scratch().appendingPathComponent("link")
+    try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+    #expect(try conversation(cwd: link.path, store: store).cwd == ORSession.folder(real.path))
+    #expect(try conversation(cwd: link.path + "/sub", store: store).cwd == ORSession.folder(real.path) + "/sub")
+}
+
+/// `sessions --cwd` finds a folder's sessions however the folder is
+/// named: by a relative path, through a link, with a tilde.
+@Test(.timeLimit(.minutes(1))) func sessionsAreFoundByFolderHoweverItIsSpelled() async throws {
+    let rig = try Rig(streams: [try reply("one")])
+    #expect(await rig.runner.turn("first"))
+    let id = rig.conversation.id
+    let link = try scratch().appendingPathComponent("link")
+    try FileManager.default.createSymbolicLink(at: link, withDestinationURL: rig.cwd)
+    #expect(rig.store.list(cwd: rig.cwd.path).map(\.id) == [id])
+    #expect(rig.store.list(cwd: rig.cwd.path + "/").map(\.id) == [id])
+    #expect(rig.store.list(cwd: rig.cwd.path + "/sub/..").map(\.id) == [id])
+    #expect(rig.store.list(cwd: link.path).map(\.id) == [id])
+    #expect(rig.store.list(cwd: rig.cwd.deletingLastPathComponent().path) == [])
+    #expect(rig.store.list().map(\.id) == [id])
+    // A session kept under another spelling of its folder (an earlier build's) is found too.
+    var older = try rig.store.load(id: id)
+    older.cwd = link.path + "/."
+    try rig.store.save(older)
+    #expect(rig.store.list(cwd: rig.cwd.path).map(\.id) == [id])
 }
 
 /// A turn whose session cannot be written says so: its result is an
@@ -500,4 +528,41 @@ private func logLines(_ rig: Rig) throws -> [ORLogLine] {
     #expect(Conversation.effort("minimal") == nil)
     #expect(Conversation.effort("") == nil)
     #expect(Conversation.effort(nil) == nil)
+}
+
+/// A failure of the network is said in words, as the terminal says it,
+/// not as an error object's dump.
+@Test(.timeLimit(.minutes(1))) func aNetworkFailureIsSaidInWords() async throws {
+    // As URLSession gives it: an error with its own words for what happened.
+    let offline = URLError(.notConnectedToInternet, userInfo: [NSLocalizedDescriptionKey: "The Internet connection appears to be offline."])
+    let rig = try Rig(streams: [], failure: offline)
+    #expect(await rig.runner.turn("hi") == false)
+    let result = try #require(try objects(try rig.written().out).last)
+    #expect(result["is_error"] as? Bool == true)
+    #expect(result["result"] as? String == "The Internet connection appears to be offline.")
+}
+
+/// A turn that failed, in a session that could not be saved either: the
+/// result says both.
+@Test(.timeLimit(.minutes(1))) func aFailedTurnThatCouldNotBeSavedSaysBoth() async throws {
+    let blocked = try scratch().appendingPathComponent("sessions")
+    try Data().write(to: blocked)
+    let rig = try Rig(streams: [["upstream is down"]], status: 502, sessions: blocked)
+    #expect(await rig.runner.turn("hi") == false)
+    let result = try #require(try objects(try rig.written().out).last?["result"] as? String)
+    #expect(result.hasPrefix("OpenRouter 502: upstream is down The session could not be saved, so what this turn added will be lost when openrouter exits: "))
+}
+
+@Test func whatIsTypedAtTheChatsPrompt() {
+    #expect(ChatInput("") == .nothing)
+    #expect(ChatInput("   ") == .nothing)
+    #expect(ChatInput("/quit") == .quit)
+    #expect(ChatInput(" /exit ") == .quit)
+    #expect(ChatInput("/model a/b") == .model("a/b"))
+    #expect(ChatInput("/model   a/b  ") == .model("a/b"))
+    // Alone, it asks which model is in use; it is not a prompt.
+    #expect(ChatInput("/model") == .model(nil))
+    #expect(ChatInput("/model ") == .model(nil))
+    #expect(ChatInput("/models are fun") == .prompt("/models are fun"))
+    #expect(ChatInput("  fix the bug ") == .prompt("fix the bug"))
 }
