@@ -1,4 +1,5 @@
-// The real transport: URLSession, with the streamed body read as lines.
+// The real transport: URLSession, with the streamed body read as lines
+// (ended by a line feed only: see Lines.swift).
 
 import Foundation
 
@@ -14,7 +15,7 @@ public struct URLSessionTransport: ORTransport {
 
     public func lines(for request: URLRequest) async throws -> (any AsyncSequence<String, any Error> & Sendable, HTTPURLResponse) {
         let (bytes, response) = try await session.bytes(for: request)
-        return (bytes.lines, try Self.http(response))
+        return (bytes.lineFeedLines, try Self.http(response))
     }
 
     /// The response as HTTP's, which the API's always is; anything else is

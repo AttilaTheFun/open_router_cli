@@ -164,3 +164,15 @@ private let noKey = "No OpenRouter API key. Run `openrouter auth login <key>` on
     let auth = try await openrouter(["auth", "nonsense"])
     #expect(auth.status == 2)
 }
+
+/// A message with a line separator in its text is one line of stdin, and
+/// one turn: read with Foundation's lines it was two halves, neither of
+/// them JSON, and the host waited on a turn that never ran.
+@Test(.timeLimit(.minutes(1))) func aMessageWithALineSeparatorInItIsOneMessage() async throws {
+    let run = try await openrouter(["-p", "--input-format", "stream-json", "--output-format", "stream-json"],
+                                   stdin: "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"one\u{2028}two\"}}\n")
+    #expect(run.status == 0)
+    #expect(run.err == "")
+    #expect(run.lines.map { $0["type"] as? String } == ["system", "result"])
+    #expect(run.lines.last?["result"] as? String == noKey)
+}

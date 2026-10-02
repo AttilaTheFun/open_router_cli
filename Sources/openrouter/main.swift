@@ -191,7 +191,7 @@ func headless() async -> Int32 {
                                 partialMessages: options.flags.contains("include-partial-messages"), output: output)
     if streamIn {
         do {
-            for try await line in FileHandle.standardInput.bytes.lines { await runner.take(line: line) }
+            for try await line in FileHandle.standardInput.bytes.lineFeedLines { await runner.take(line: line) }
         } catch {
             output.error("stdin: \(error.localizedDescription)")
         }

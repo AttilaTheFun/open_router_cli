@@ -430,10 +430,12 @@ private func logLines(_ rig: Rig) throws -> [ORLogLine] {
     await rig.runner.take(line: #"{"type":"control_request","request_id":"init-1","request":{"subtype":"initialize"}}"#)
     await rig.runner.take(line: #"{"type":"keep_alive"}"#)
     await rig.runner.take(line: "not json")
+    await rig.runner.take(line: "")
     await rig.runner.take(line: #"{"type":"control_request","request_id":"int-1","request":{"subtype":"interrupt"}}"#)
     await rig.runner.take(line: #"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}"#)
     await rig.runner.drain()
-    let lines = try objects(try rig.written().out)
+    let written = try rig.written()
+    let lines = try objects(written.out)
     #expect(lines.map { $0["type"] as? String } == ["control_response", "control_response", "stream_event", "stream_event", "assistant", "result"])
     // A request it does not take is refused, not left unanswered.
     #expect(lines[0]["response"] as? [String: String] == ["request_id": "init-1", "subtype": "error",
@@ -442,6 +444,9 @@ private func logLines(_ rig: Rig) throws -> [ORLogLine] {
     #expect(lines[1]["response"] as? [String: String] == ["request_id": "int-1", "subtype": "success"])
     #expect(lines[5]["result"] as? String == "hello back")
     #expect(try await rig.mock.sentMessages().first?.last == ["role": "user", "content": "hello"])
+    // The line that was not JSON is said to have been passed over; the
+    // JSON of a type there is no use for, and the blank line, are not.
+    #expect(written.err == "openrouter: a line on stdin is not JSON, and was passed over (8 bytes)\n")
 }
 
 /// A message with no text is not sent to the model as an empty one: its
