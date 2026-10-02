@@ -34,7 +34,7 @@ public actor MockTransport: ORTransport {
         return (dataBody, try response(to: request))
     }
 
-    public func lines(for request: URLRequest) async throws -> (AsyncThrowingStream<String, Error>, HTTPURLResponse) {
+    public func lines(for request: URLRequest) async throws -> (any AsyncSequence<String, any Error> & Sendable, HTTPURLResponse) {
         if let body = request.httpBody { sentBodies.append(body) }
         let batch = index < streams.count ? streams[index] : []
         index += 1
@@ -103,11 +103,11 @@ public struct EchoTool: ORTool {
     }
 }
 
-/// Keeps the events a turn reports, in order.
-public actor Recorder {
-    public private(set) var events: [ORAgentEvent] = []
+/// Keeps the events a turn or a completion reports, in order.
+public actor Recorder<Event: Sendable> {
+    public private(set) var events: [Event] = []
     public init() {}
-    public func add(_ event: ORAgentEvent) { events.append(event) }
+    public func add(_ event: Event) { events.append(event) }
 }
 
 /// A folder of the test's own.

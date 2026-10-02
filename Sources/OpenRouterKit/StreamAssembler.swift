@@ -1,8 +1,9 @@
 // Reassembles a streamed chat completion. OpenRouter sends deltas: text a
 // fragment at a time, and tool calls whose name and arguments arrive in
 // pieces, indexed. This gathers them into whole tokens and, at the end,
-// one assistant message with its text and tool calls — or throws, when
-// the stream says it failed or ends before the completion does.
+// the completion: one assistant message with its text and tool calls —
+// or throws, when the stream says it failed or ends before the
+// completion does.
 
 import Foundation
 
@@ -11,8 +12,8 @@ struct StreamAssembler {
     private var calls: [Int: ORToolCall] = [:]
     private var finishReason: String?
 
-    /// Feeds one SSE data object, yielding token events as text arrives.
-    /// Tool calls are held until `finish`, when they are whole. Throws
+    /// Feeds one SSE data object, yielding events as text and usage
+    /// arrive. Tool calls are held until `finish`, when they are whole. Throws
     /// when the object is not one (`malformed`) or carries an error
     /// (`failed`): a provider that fails part-way says so in the stream,
     /// the HTTP status having long been sent as 200.
@@ -56,13 +57,13 @@ struct StreamAssembler {
     /// calls assembled, and why the model stopped. Throws `incomplete`
     /// when nothing said the completion was: no finish reason, and no
     /// `[DONE]` (`sawDone`) — the connection ended first.
-    func finish(sawDone: Bool) throws -> ORStreamEvent {
+    func finish(sawDone: Bool) throws -> ORCompletion {
         guard finishReason != nil || sawDone else { throw ORStreamError.incomplete }
         if finishReason == "error" { throw ORStreamError.failed(code: nil, message: "the provider ended the reply with an error") }
         let toolCalls = calls.keys.sorted().compactMap { calls[$0] }.filter { !$0.id.isEmpty || !$0.function.name.isEmpty }
         let message = ORMessage(role: .assistant,
                                 content: text.isEmpty ? nil : text,
                                 toolCalls: toolCalls.isEmpty ? nil : toolCalls)
-        return .finished(reason: finishReason, message: message)
+        return ORCompletion(message: message, finishReason: finishReason)
     }
 }

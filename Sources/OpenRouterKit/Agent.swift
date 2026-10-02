@@ -150,24 +150,14 @@ public actor ORAgent {
             let request = ORChatRequest(model: model, messages: ORMessage.answeringEveryToolCall(messages), tools: tools,
                                         temperature: temperature, reasoningEffort: reasoningEffort)
             let messageID = Self.newMessageID()
-            var finished: (reason: String?, message: ORMessage)?
-            for try await event in client.stream(request) {
+            let completion = try await client.complete(request) { event in
                 switch event {
                 case .token(let text): await onEvent(.delta(text, messageID: messageID))
                 case .usage(let prompt, let completion): await onEvent(.usage(prompt: prompt, completion: completion))
-                case .toolCall: break // gathered into the finished message
-                case .finished(let reason, let message): finished = (reason, message)
                 }
             }
-            guard let finished else {
-                // The client's stream ends with a finished message or a
-                // throw; it ends with neither only when this task was
-                // cancelled. The text so far is not kept.
-                try Task.checkCancellation()
-                throw ORStreamError.incomplete
-            }
-            var message = finished.message
-            let cutOff = finished.reason.flatMap { Self.cutOffReasons.contains($0) ? $0 : nil }
+            var message = completion.message
+            let cutOff = completion.finishReason.flatMap { Self.cutOffReasons.contains($0) ? $0 : nil }
             // A reply cut off may have cut a tool call's arguments short:
             // its calls are neither kept nor run.
             if cutOff != nil { message.toolCalls = nil }
