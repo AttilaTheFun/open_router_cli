@@ -38,11 +38,15 @@ struct ToolFailure: LocalizedError {
 
 public struct BashTool: ORTool {
     public let name = "bash"
-    public let toolDescription = "Run a shell command in the working directory and return its output (stdout and stderr) and exit status. Use for builds, tests, git, searches, and anything else a terminal does."
+    public let toolDescription = "Run a shell command in the working directory and return its output (stdout and stderr) and exit status. Use for builds, tests, git, searches, and anything else a terminal does. Output is read until the command exits: a job left running in the background must redirect its own output."
     public let parametersJSON = """
-        {"type":"object","properties":{"command":{"type":"string","description":"The command to run with zsh -c"},"timeout":{"type":"integer","description":"Seconds before the command is killed (default 120)"}},"required":["command"]}
+        {"type":"object","properties":{"command":{"type":"string","description":"The command to run with zsh -lc"},"timeout":{"type":"integer","description":"Seconds before the command is killed (default 120, at most 600)"}},"required":["command"]}
         """
     let cwd: String
+
+    /// How many bytes of output the model sees; a build log is not a
+    /// conversation. The rest is counted and dropped as it arrives.
+    static let kept = 30_000
 
     public init(cwd: String) { self.cwd = cwd }
 
@@ -51,34 +55,16 @@ public struct BashTool: ORTool {
         guard let command = args["command"] as? String, !command.isEmpty else { throw ToolFailure(message: "bash needs a command") }
         // Seconds; a model that sends milliseconds gets the cap.
         let timeout = min(600, max(1, (args["timeout"] as? Int) ?? 120))
-        let cwd = cwd
-        return try await Task.detached {
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            p.arguments = ["-lc", command]
-            p.currentDirectoryURL = URL(fileURLWithPath: cwd)
-            let out = Pipe()
-            p.standardOutput = out
-            p.standardError = out
-            p.standardInput = FileHandle.nullDevice
-            // Drained on its own thread: a command that fills the pipe
-            // would otherwise block before it exits.
-            final class Box: @unchecked Sendable { var data = Data() }
-            let box = Box()
-            let reader = Thread { box.data = out.fileHandleForReading.readDataToEndOfFile() }
-            do { try p.run() } catch { throw ToolFailure(message: "could not run: \(error.localizedDescription)") }
-            reader.start()
-            let deadline = Date().addingTimeInterval(TimeInterval(timeout))
-            while p.isRunning && Date() < deadline { usleep(20_000) }
-            var timedOut = false
-            if p.isRunning { timedOut = true; p.terminate(); usleep(200_000); if p.isRunning { kill(p.processIdentifier, SIGKILL) } }
-            p.waitUntilExit()
-            while !reader.isFinished { usleep(10_000) }
-            var text = String(decoding: box.data, as: UTF8.self)
-            if timedOut { text += "\n(killed after \(timeout)s)" }
-            text += "\n[exit \(p.terminationStatus)]"
-            return CodingTools.capped(text)
-        }.value
+        let outcome = try await Shell.run(command, cwd: cwd, timeout: .seconds(timeout), keep: Self.kept)
+        var text = String(decoding: outcome.output, as: UTF8.self)
+        if outcome.dropped > 0 { text += "\n… (\(outcome.dropped) more bytes truncated)" }
+        switch outcome.stopped {
+        case .deadline: text += "\n(killed after \(timeout)s)"
+        case .cancelled: text += "\n(interrupted)"
+        case nil: break
+        }
+        text += outcome.signalled ? "\n[signal \(outcome.status)]" : "\n[exit \(outcome.status)]"
+        return text
     }
 }
 
