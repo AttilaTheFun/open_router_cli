@@ -13,8 +13,10 @@ public enum ORAgentEvent: Sendable {
     case delta(String)
     /// The model asked to run a tool.
     case toolCall(name: String, arguments: String, id: String)
-    /// A tool finished; its output (what the model sees next).
-    case toolResult(name: String, output: String, id: String)
+    /// A tool call was answered: the output (what the model sees next),
+    /// and whether it is an error's — the tool threw, there is no such
+    /// tool, or the turn was interrupted — rather than the tool's own.
+    case toolResult(name: String, output: String, id: String, isError: Bool)
     /// One assistant message finished (text). A turn may have several,
     /// with tool runs between; each is its own message.
     case message(String)
@@ -88,16 +90,33 @@ public actor ORAgent {
     /// lands. Each event is awaited: the turn goes on when `onEvent`
     /// returns, so a consumer sees them in order and can read `history`
     /// from inside it.
+    ///
+    /// Cancelling the task interrupts the turn: the completion in flight
+    /// is dropped, a running tool is cancelled, the tools not yet run are
+    /// not run, and `send` throws `CancellationError` — after every tool
+    /// call the model made has an answer in `messages`, so the
+    /// conversation can go on from there.
     public func send(_ userText: String, onEvent: @Sendable (ORAgentEvent) async -> Void) async throws {
         guard !isRunning else { throw ORAgentError.turnInProgress }
         isRunning = true
         defer { isRunning = false }
         messages.append(ORMessage(role: .user, content: userText))
         await onEvent(.started)
+        do {
+            try await rounds(onEvent)
+        } catch where Task.isCancelled {
+            // Whatever a cancelled turn threw on its way out (the
+            // transport has its own errors for it), it ended because it
+            // was cancelled.
+            throw CancellationError()
+        }
+    }
+
+    private func rounds(_ onEvent: @Sendable (ORAgentEvent) async -> Void) async throws {
         for _ in 0..<maxRounds {
-            if Task.isCancelled { return }
-            let request = ORChatRequest(model: model, messages: messages, tools: tools, temperature: temperature,
-                                        reasoningEffort: reasoningEffort)
+            try Task.checkCancellation()
+            let request = ORChatRequest(model: model, messages: ORMessage.answeringEveryToolCall(messages), tools: tools,
+                                        temperature: temperature, reasoningEffort: reasoningEffort)
             var finished: ORMessage?
             for try await event in client.stream(request) {
                 switch event {
@@ -107,23 +126,37 @@ public actor ORAgent {
                 case .finished(_, let message): finished = message
                 }
             }
-            guard let message = finished else { return }
+            guard let message = finished else {
+                // A cancelled task's stream ends early, with no finished
+                // message; the text so far is not kept.
+                try Task.checkCancellation()
+                return
+            }
             messages.append(message)
             await onEvent(.assistant(message))
             if let text = message.content, !text.isEmpty { await onEvent(.message(text)) }
             guard let calls = message.toolCalls, !calls.isEmpty else { return }
             for call in calls {
                 await onEvent(.toolCall(name: call.function.name, arguments: call.function.arguments, id: call.id))
-                let output: String
-                if let tool = toolsByName[call.function.name] {
-                    do { output = try await tool.call(arguments: call.function.arguments) }
-                    catch { output = "Error: \(error.localizedDescription)" }
-                } else {
-                    output = "Error: no tool named \(call.function.name)"
-                }
-                messages.append(ORMessage(role: .tool, content: output, toolCallID: call.id, name: call.function.name))
-                await onEvent(.toolResult(name: call.function.name, output: output, id: call.id))
+                let answer = await answer(call)
+                messages.append(ORMessage(role: .tool, content: answer.output, toolCallID: call.id, name: call.function.name))
+                await onEvent(.toolResult(name: call.function.name, output: answer.output, id: call.id, isError: answer.isError))
             }
+        }
+    }
+
+    /// Runs the tool a call names. Once the turn is cancelled nothing more
+    /// is run, but the call is still answered: the API refuses a
+    /// conversation in which a tool call was left open.
+    private func answer(_ call: ORToolCall) async -> (output: String, isError: Bool) {
+        if Task.isCancelled { return (ORMessage.notRun, true) }
+        guard let tool = toolsByName[call.function.name] else { return ("Error: no tool named \(call.function.name)", true) }
+        do {
+            return (try await tool.call(arguments: call.function.arguments), false)
+        } catch is CancellationError {
+            return (ORMessage.stopped, true)
+        } catch {
+            return ("Error: \(error.localizedDescription)", true)
         }
     }
 }

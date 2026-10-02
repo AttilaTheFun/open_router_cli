@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import OpenRouterKit
+import TestSupport
 
 @Test func streamsTokensAndFinishes() async throws {
     let mock = MockTransport(streams: [[
@@ -48,13 +49,13 @@ import Testing
     for event in await recorder.events {
         switch event {
         case .toolCall(let name, let args, let id): calls.append("\(id) \(name):\(args)")
-        case .toolResult(let name, let output, let id): results.append("\(id) \(name):\(output)")
+        case .toolResult(let name, let output, let id, let isError): results.append("\(id) \(name):\(output) \(isError)")
         case .message(let text): texts.append(text)
         default: break
         }
     }
     #expect(calls == ["call_1 echo:{\"text\":\"hi\"}"])
-    #expect(results == ["call_1 echo:hi"])
+    #expect(results == ["call_1 echo:hi false"])
     #expect(texts == ["done"])
     // The conversation carries the user's message, the assistant's tool
     // call, the tool's result, and the reply.

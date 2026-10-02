@@ -120,6 +120,41 @@ public struct ORMessage: Codable, Hashable, Sendable {
     }
 }
 
+extension ORMessage {
+    /// What answers a tool call the turn was interrupted before running.
+    static let notRun = "Interrupted: the turn was stopped before this ran."
+    /// What answers a tool call that was running when the turn was interrupted.
+    static let stopped = "Interrupted: the turn was stopped while this was running."
+    /// What answers a tool call with no answer on record.
+    static let unanswered = "Interrupted: no result was recorded for this call."
+
+    /// The conversation as the API takes it: every tool call answered,
+    /// directly after the message that made it. A conversation the agent
+    /// kept is already so; one from a process that was killed with a tool
+    /// running, or from a build that saved an interrupted turn as it
+    /// stood, is not, and is refused until it is. A call's answer is
+    /// looked for up to the next message that makes calls; a call with
+    /// none gets `unanswered`; an answer to no call is left out.
+    static func answeringEveryToolCall(_ messages: [ORMessage]) -> [ORMessage] {
+        var result: [ORMessage] = []
+        for (index, message) in messages.enumerated() where message.role != .tool {
+            result.append(message)
+            guard message.role == .assistant, let calls = message.toolCalls, !calls.isEmpty else { continue }
+            let rest = messages[(index + 1)...]
+            let end = rest.firstIndex { $0.role == .assistant && !($0.toolCalls ?? []).isEmpty } ?? messages.endIndex
+            var answers = rest[..<end].filter { $0.role == .tool }
+            for call in calls {
+                if let found = answers.firstIndex(where: { $0.toolCallID == call.id }) {
+                    result.append(answers.remove(at: found))
+                } else {
+                    result.append(ORMessage(role: .tool, content: unanswered, toolCallID: call.id, name: call.function.name))
+                }
+            }
+        }
+        return result
+    }
+}
+
 /// A tool call the model asked for.
 public struct ORToolCall: Codable, Hashable, Sendable, Identifiable {
     public var id: String

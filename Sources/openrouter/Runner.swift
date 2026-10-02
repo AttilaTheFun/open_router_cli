@@ -10,7 +10,15 @@ import Synchronization
 /// is its state, written by the turn in flight and by whoever changes the
 /// model.
 actor Conversation {
+    /// A turn was asked for with no key to run it.
+    struct NoKey: LocalizedError {
+        var errorDescription: String? {
+            "No OpenRouter API key. Run `openrouter auth login <key>` on this computer (keys: https://openrouter.ai/keys), or set OPENROUTER_API_KEY."
+        }
+    }
+
     private let store: ORSessionStore
+    private let makeClient: @Sendable () -> OpenRouterClient
     private var session: ORSession
     nonisolated let id: String
     nonisolated let cwd: String
@@ -30,9 +38,12 @@ actor Conversation {
     /// - Parameters:
     ///   - resume: a session id to carry on (its file must exist).
     ///   - sessionID: the id a new session should have (a host that names them).
-    init(resume: String?, sessionID: String?, cwd: String, model requested: String?, effort: String?) throws {
+    ///   - store: where sessions are kept.
+    ///   - makeClient: the client, made afresh for each turn with the key
+    ///     as it is then.
+    init(resume: String?, sessionID: String?, cwd: String, model requested: String?, effort: String?,
+         store: ORSessionStore = ORSessionStore(), makeClient: @escaping @Sendable () -> OpenRouterClient = { OpenRouterClient() }) throws {
         let root = (cwd as NSString).expandingTildeInPath
-        let store = ORSessionStore()
         let session: ORSession
         if let resume, !resume.isEmpty {
             var kept = try store.load(id: resume)
@@ -41,8 +52,9 @@ actor Conversation {
         } else {
             session = ORSession(id: sessionID ?? ORSession.newID(), cwd: root, model: ORConfig.model(requested: requested))
         }
-        let client = OpenRouterClient()
+        let client = makeClient()
         self.store = store
+        self.makeClient = makeClient
         self.session = session
         self.client = client
         id = session.id
@@ -76,7 +88,7 @@ actor Conversation {
     /// The key is read afresh for each turn, so a key set after launch
     /// (in the config file) is picked up without a restart.
     private func refreshKey() async {
-        let fresh = OpenRouterClient()
+        let fresh = makeClient()
         guard fresh.apiKey != client.apiKey else { return }
         client = fresh
         await agent.setClient(fresh)
@@ -84,10 +96,12 @@ actor Conversation {
 
     /// Runs one user turn, handing each event on, and keeps the session
     /// file current as messages land: the user's message at once, so a
-    /// host following the log shows it as it is sent. Throws what the API
-    /// threw; the conversation so far is saved either way.
+    /// host following the log shows it as it is sent. Throws what the
+    /// turn threw (`CancellationError` when it was interrupted); the
+    /// conversation so far is saved either way.
     func run(_ text: String, sink: @Sendable (ORAgentEvent) async -> Void) async throws {
         await refreshKey()
+        guard client.hasKey else { throw NoKey() }
         do {
             try await agent.send(text) { event in
                 await sink(event)
@@ -184,8 +198,8 @@ actor StreamJSONTurn {
             if let text = message.content, !text.isEmpty { lastText = text }
             started = false
             usage = nil
-        case .toolResult(_, let result, let id):
-            output.line(StreamJSON.toolResult(callID: id, output: result, isError: result.hasPrefix("Error:")))
+        case .toolResult(_, let result, let id, let isError):
+            output.line(StreamJSON.toolResult(callID: id, output: result, isError: isError))
         case .started, .message, .toolCall:
             break
         }
@@ -194,7 +208,8 @@ actor StreamJSONTurn {
 
 /// The headless loop: stdin lines in, stream-json (or text) out. Turns
 /// run one at a time; a message arriving mid-turn waits its turn; an
-/// interrupt cancels the turn in flight.
+/// interrupt cancels the turn in flight, which ends with an error result
+/// of its own.
 actor HeadlessRunner {
     private let conversation: Conversation
     private let streamOut: Bool
@@ -234,13 +249,11 @@ actor HeadlessRunner {
         }
     }
 
-    private func turn(_ text: String) async {
+    /// Runs one turn and reports how it ended: a result line (stream-json)
+    /// or the reply's text, with a failure on stderr. Whether it succeeded.
+    @discardableResult
+    func turn(_ text: String) async -> Bool {
         let id = conversation.id
-        guard await conversation.hasKey || ORConfig.resolvedKey() != nil else {
-            let message = "No OpenRouter API key. Run `openrouter auth login <key>` on this computer (keys: https://openrouter.ai/keys), or set OPENROUTER_API_KEY."
-            if streamOut { output.line(StreamJSON.result(isError: true, text: message, sessionID: id)) } else { output.error(message) }
-            return
-        }
         let lines = StreamJSONTurn(model: await conversation.model, output: output)
         do {
             try await conversation.run(text) { [streamOut, output] event in
@@ -251,11 +264,11 @@ actor HeadlessRunner {
                 }
             }
             if streamOut { output.line(StreamJSON.result(isError: false, text: await lines.lastText, sessionID: id)) } else { output.text("\n") }
-        } catch is CancellationError {
-            if streamOut { output.line(StreamJSON.result(isError: true, text: "Interrupted", sessionID: id)) }
+            return true
         } catch {
-            let message = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+            let message = error is CancellationError ? "Interrupted" : (error as? LocalizedError)?.errorDescription ?? "\(error)"
             if streamOut { output.line(StreamJSON.result(isError: true, text: message, sessionID: id)) } else { output.error(message) }
+            return false
         }
     }
 }

@@ -19,6 +19,10 @@ let package = Package(
     targets: [
         .target(name: "OpenRouterKit"),
         .executableTarget(name: "openrouter", dependencies: ["OpenRouterKit"]),
-        .testTarget(name: "OpenRouterKitTests", dependencies: ["OpenRouterKit"]),
+        // What both test targets use: the mock transport, so no test
+        // reaches the network.
+        .target(name: "TestSupport", dependencies: ["OpenRouterKit"], path: "Tests/TestSupport"),
+        .testTarget(name: "OpenRouterKitTests", dependencies: ["OpenRouterKit", "TestSupport"]),
+        .testTarget(name: "OpenRouterCLITests", dependencies: ["openrouter", "OpenRouterKit", "TestSupport"]),
     ]
 )

@@ -36,6 +36,14 @@ same file is the default model. `OPENROUTER_HOME` moves the folder.
     openrouter -p --input-format stream-json --output-format stream-json --include-partial-messages [--resume <id>]
                                                 Claude Code's protocol on stdin/stdout (what Visor runs)
 
+Headless, a turn ends with a `result` line. An interrupt (a
+`control_request` with subtype `interrupt` on stdin) stops the turn in
+flight: the reply being written is dropped, a running command is killed,
+the tools not yet run are not run, and the turn ends with an error result
+("Interrupted", `error_during_execution`), as Claude Code's does; the
+session is saved with every tool call answered, so it carries on from
+there. `openrouter -p PROMPT` exits 1 when its one turn fails.
+
 The model list (ids, names, prices per token, tool support) is kept in
 `~/.openrouter/models.json` and refreshed when older than a day, by
 `openrouter models` or any headless run; Visor's model picker reads it.
