@@ -63,8 +63,12 @@ public struct OpenRouterClient: Sendable {
         return category == nil ? list.sorted { $0.id < $1.id } : list
     }
 
-    /// Streams one completion, yielding tokens and tool calls as they come
-    /// and a `finished` at the end with the assembled assistant message.
+    /// Streams one completion, yielding tokens as they come and a
+    /// `finished` at the end with the assembled assistant message and why
+    /// the model stopped. The stream throws rather than finish when the
+    /// request is refused (`OpenRouterError`), or when the reply fails or
+    /// is cut short on the way (`ORStreamError`): a `finished` is only
+    /// ever a completion the API said was complete.
     public func stream(_ chat: ORChatRequest) -> AsyncThrowingStream<ORStreamEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
@@ -79,14 +83,16 @@ public struct OpenRouterClient: Sendable {
                         throw OpenRouterError(status: response.statusCode, body: body)
                     }
                     var assembler = StreamAssembler()
+                    var sawDone = false
                     for try await line in lines {
+                        // Server-Sent Events: only data lines matter here;
+                        // the rest are comments (keep-alives) and blanks.
                         guard line.hasPrefix("data:") else { continue }
                         let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
-                        if payload == "[DONE]" { break }
-                        guard let data = payload.data(using: .utf8) else { continue }
-                        for event in assembler.ingest(data) { continuation.yield(event) }
+                        if payload == "[DONE]" { sawDone = true; break }
+                        for event in try assembler.ingest(Data(payload.utf8)) { continuation.yield(event) }
                     }
-                    continuation.yield(assembler.finish())
+                    continuation.yield(try assembler.finish(sawDone: sawDone))
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)

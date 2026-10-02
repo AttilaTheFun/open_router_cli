@@ -227,15 +227,37 @@ public enum ORStreamEvent: Sendable {
     case token(String)
     /// A tool call, assembled from its streamed fragments.
     case toolCall(ORToolCall)
-    /// The completion ended; the reason, and the assistant message as it
-    /// finished (text and any tool calls), to append to the conversation.
+    /// The completion ended; the reason the API gave ("stop",
+    /// "tool_calls", "length", "content_filter"), and the assistant
+    /// message as it finished (text and any tool calls).
     case finished(reason: String?, message: ORMessage)
     /// The tokens the request and reply used, when reported.
     case usage(prompt: Int, completion: Int)
 }
 
-public struct OpenRouterError: LocalizedError {
+/// The API refused a request: the HTTP status and the body it sent.
+public struct OpenRouterError: LocalizedError, Equatable {
     public let status: Int
     public let body: String
     public var errorDescription: String? { "OpenRouter \(status): \(body)" }
+}
+
+/// A streamed completion that did not complete.
+public enum ORStreamError: LocalizedError, Equatable {
+    /// The stream carried an error: the provider failed after the reply
+    /// had begun.
+    case failed(code: String?, message: String)
+    /// The stream ended with nothing saying the completion had: the
+    /// connection was lost, or something between cut it short.
+    case incomplete
+    /// A data line was not a completion chunk; the start of it.
+    case malformed(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .failed(let code, let message): "OpenRouter failed during the reply: \(message)" + (code.map { " (\($0))" } ?? "")
+        case .incomplete: "The reply was cut off: the stream ended before the model finished."
+        case .malformed(let start): "OpenRouter sent something that is not a completion: \(start)"
+        }
+    }
 }
