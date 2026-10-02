@@ -121,8 +121,24 @@ import TestSupport
     #expect(StreamJSON.parse(blocks) == .user("hello\nthere"))
     #expect(StreamJSON.parse("{\"type\":\"user\",\"message\":{\"content\":\"plain\"}}") == .user("plain"))
     #expect(StreamJSON.parse("{\"type\":\"control_request\",\"request_id\":\"int-1\",\"request\":{\"subtype\":\"interrupt\"}}") == .interrupt(requestID: "int-1"))
+    // Any other control request is one too, to be answered.
+    #expect(StreamJSON.parse("{\"type\":\"control_request\",\"request_id\":\"r-2\",\"request\":{\"subtype\":\"set_model\",\"model\":\"x\"}}")
+        == .control(requestID: "r-2", subtype: "set_model"))
+    // A message with no text in it.
+    #expect(StreamJSON.parse("{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"image\",\"source\":{}}]}}") == .user(""))
+    #expect(StreamJSON.parse("{\"type\":\"user\"}") == nil)
     #expect(StreamJSON.parse("{\"type\":\"other\"}") == nil)
     #expect(StreamJSON.parse("not json") == nil)
+}
+
+@Test func controlRequestsAreAnsweredInClaudeCodesShape() throws {
+    func response(_ line: String) throws -> [String: String] {
+        let root = try #require(try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+        #expect(root["type"] as? String == "control_response")
+        return try #require(root["response"] as? [String: String])
+    }
+    #expect(try response(StreamJSON.controlResponse(requestID: "int-1")) == ["request_id": "int-1", "subtype": "success"])
+    #expect(try response(StreamJSON.controlError(requestID: "r-2", error: "no")) == ["request_id": "r-2", "subtype": "error", "error": "no"])
 }
 
 @Test func assistantLineCarriesTextAndToolUseBlocks() throws {
