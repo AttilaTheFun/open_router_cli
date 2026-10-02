@@ -39,6 +39,18 @@ public struct ORSession: Codable, Sendable, Identifiable, Equatable {
     }
 }
 
+public enum ORSessionError: LocalizedError, Equatable {
+    /// The id cannot name a session: it would not be a file in the
+    /// sessions folder.
+    case invalidID(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidID(let id): "\"\(id)\" is not a session id (letters, digits, \"-\", \"_\" and \".\", starting with a letter or digit)."
+        }
+    }
+}
+
 public struct ORSessionStore: Sendable {
     public let directory: URL
 
@@ -46,22 +58,41 @@ public struct ORSessionStore: Sendable {
         self.directory = directory
     }
 
-    public func url(for id: String) -> URL { directory.appendingPathComponent(id + ".json") }
+    /// Whether an id can name a session. Ids become file names, and they
+    /// come from outside (`--resume`, `--session-id`, a host): one with a
+    /// "/" or a leading "." in it would name a file somewhere else.
+    public static func isValid(id: String) -> Bool {
+        guard let first = id.unicodeScalars.first, id.unicodeScalars.count <= 128 else { return false }
+        let alphanumerics = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
+        return alphanumerics.contains(first) && id.unicodeScalars.allSatisfy { alphanumerics.contains($0) || "-_.".unicodeScalars.contains($0) }
+    }
+
+    private func file(_ id: String, _ suffix: String) throws -> URL {
+        guard Self.isValid(id: id) else { throw ORSessionError.invalidID(id) }
+        return directory.appendingPathComponent(id + suffix)
+    }
+
+    /// The session's file. Throws for an id that cannot name one.
+    public func url(for id: String) throws -> URL { try file(id, ".json") }
 
     public func load(id: String) throws -> ORSession {
         let data = try Data(contentsOf: url(for: id))
         return try JSONDecoder().decode(ORSession.self, from: data)
     }
 
-    public func exists(id: String) -> Bool { FileManager.default.fileExists(atPath: url(for: id).path) }
+    public func exists(id: String) -> Bool {
+        guard let url = try? url(for: id) else { return false }
+        return FileManager.default.fileExists(atPath: url.path)
+    }
 
     public func save(_ session: ORSession) throws {
+        let url = try url(for: session.id)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         var stamped = session
         stamped.updated = Date().timeIntervalSince1970
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        try encoder.encode(stamped).write(to: url(for: session.id), options: .atomic)
+        try encoder.encode(stamped).write(to: url, options: .atomic)
     }
 
     public func remove(id: String) throws {
@@ -69,12 +100,13 @@ public struct ORSessionStore: Sendable {
         try? FileManager.default.removeItem(at: logURL(for: id))
     }
 
-    /// The session's log: a line per message, appended to only.
-    public func logURL(for id: String) -> URL { directory.appendingPathComponent(id + ".jsonl") }
+    /// The session's log: a line per message, appended to only. Throws
+    /// for an id that cannot name one.
+    public func logURL(for id: String) throws -> URL { try file(id, ".jsonl") }
 
     /// How many messages the log holds.
     public func loggedCount(id: String) -> Int {
-        guard let data = try? Data(contentsOf: logURL(for: id)) else { return 0 }
+        guard let url = try? logURL(for: id), let data = try? Data(contentsOf: url) else { return 0 }
         return data.split(separator: 0x0A).filter { !$0.isEmpty }.count
     }
 
@@ -82,6 +114,7 @@ public struct ORSessionStore: Sendable {
     /// `{"id", "timestamp", "message"}`.
     public func appendLog(id: String, _ messages: [ORMessage]) throws {
         guard !messages.isEmpty else { return }
+        let url = try logURL(for: id)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
@@ -92,7 +125,6 @@ public struct ORSessionStore: Sendable {
             data.append(try encoder.encode(line))
             data.append(0x0A)
         }
-        let url = logURL(for: id)
         if !FileManager.default.fileExists(atPath: url.path) {
             try data.write(to: url)
             return
