@@ -60,7 +60,7 @@ public enum ORSessionError: LocalizedError, Equatable {
 public struct ORSessionStore: Sendable {
     public let directory: URL
 
-    public init(directory: URL = ORConfig.directory.appendingPathComponent("sessions", isDirectory: true)) {
+    public init(directory: URL = ORConfig.directory().appendingPathComponent("sessions", isDirectory: true)) {
         self.directory = directory
     }
 

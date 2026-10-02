@@ -23,8 +23,10 @@ coding-agent CLI.
     openrouter auth login                            # or export OPENROUTER_API_KEY=sk-or-…
 
 The key lives in `~/.openrouter/config.json` (owner-only) or the
-environment (`OPENROUTER_API_KEY`, `OPEN_ROUTER_API_KEY`); `model` in the
-same file is the default model. `OPENROUTER_HOME` moves the folder.
+environment (`OPENROUTER_API_KEY`, `OPEN_ROUTER_API_KEY`, which win over
+the file); `model` in the same file is the default model.
+`OPENROUTER_HOME` moves the folder. `openrouter auth login` asks
+OpenRouter whether it knows the key before keeping it.
 
 ## Use
 
@@ -67,8 +69,9 @@ result, which says which. `openrouter -p PROMPT` exits 1 when its one turn
 fails.
 
 The model list (ids, names, prices per token, tool support) is kept in
-`~/.openrouter/models.json` and refreshed when older than a day, by
-`openrouter models` or any headless run; Visor's model picker reads it.
+`~/.openrouter/models.json`: `openrouter models` fetches it afresh, and a
+headless run fetches it when what is there is more than a day old. It
+needs no key (the list is public). Visor's model picker reads the file.
 
 Sessions are kept in `~/.openrouter/sessions/<id>.json` — the messages,
 the folder, the model — with a log beside each, `<id>.jsonl`: a line per
