@@ -1,8 +1,14 @@
 // The coding tools: what makes the model an agent in a folder rather than
-// a chat. A shell, and files read, written, edited and listed, all
-// relative to the working directory. The shapes are the ones the popular
-// agents use (`command`, `path`, `old_string`/`new_string`), so a consumer
-// that summarises a call by its input reads them the same way.
+// a chat. A shell, and files read, written, edited and listed. The shapes
+// are the ones the popular agents use (`command`, `path`,
+// `old_string`/`new_string`), so a consumer that summarises a call by its
+// input reads them the same way.
+//
+// The file tools reach only inside the working directory: a path that
+// leads out of it (`..`, an absolute path, `~`, a symbolic link) is
+// refused. The shell is not confined — it runs whatever the model writes,
+// as the user — so with bash in the set the folder is where the agent
+// works, not a wall around it; a host that wants the wall leaves bash out.
 
 import Foundation
 
@@ -13,11 +19,44 @@ public enum CodingTools {
         return [BashTool(cwd: root), ReadFileTool(cwd: root), WriteFileTool(cwd: root), EditFileTool(cwd: root), ListDirectoryTool(cwd: root)]
     }
 
-    /// A path from the model, resolved under the working directory.
-    static func resolve(_ path: String, in cwd: String) -> String {
+    /// A path from the model as the file it names, which must be inside
+    /// the working directory: relative paths start there, and where the
+    /// path ends up is judged with `..` and symbolic links followed, so
+    /// neither leads out. The path returned is that end, and is what the
+    /// tool then opens.
+    static func resolve(_ path: String, in cwd: String) throws -> String {
         let expanded = (path as NSString).expandingTildeInPath
-        if expanded.hasPrefix("/") { return expanded }
-        return (cwd as NSString).appendingPathComponent(expanded)
+        let root = try canonical(URL(fileURLWithPath: cwd).path)
+        let target = try canonical(expanded.hasPrefix("/") ? expanded : (root as NSString).appendingPathComponent(expanded))
+        guard target == root || target.hasPrefix(root == "/" ? root : root + "/") else {
+            throw ToolFailure(message: "\(path) is outside the working directory (\(cwd)); the file tools only reach inside it")
+        }
+        return target
+    }
+
+    /// An absolute path with `.` and `..` taken out and every symbolic
+    /// link followed, whether or not anything exists at its end yet (a
+    /// file about to be written has no path to ask the system about).
+    static func canonical(_ path: String) throws -> String {
+        var pending = Array(path.split(separator: "/").map(String.init).reversed())
+        var resolved: [String] = []
+        var links = 0
+        while let component = pending.popLast() {
+            if component == "." { continue }
+            if component == ".." { _ = resolved.popLast(); continue }
+            let here = "/" + (resolved + [component]).joined(separator: "/")
+            guard let destination = try? FileManager.default.destinationOfSymbolicLink(atPath: here) else {
+                resolved.append(component)
+                continue
+            }
+            // A link: what it points to takes its place, from the root if
+            // it is absolute, and is walked in turn.
+            links += 1
+            guard links <= 64 else { throw ToolFailure(message: "too many symbolic links in \(path)") }
+            if destination.hasPrefix("/") { resolved = [] }
+            pending.append(contentsOf: destination.split(separator: "/").map(String.init).reversed())
+        }
+        return "/" + resolved.joined(separator: "/")
     }
 
     static func arguments(_ json: String) -> [String: Any] {
@@ -70,7 +109,7 @@ public struct BashTool: ORTool {
 
 public struct ReadFileTool: ORTool {
     public let name = "read_file"
-    public let toolDescription = "Read a text file. Returns its lines, numbered, from `offset` (1-based) for `limit` lines (default the first 400)."
+    public let toolDescription = "Read a text file in the working directory. Returns its lines, numbered, from `offset` (1-based) for `limit` lines (default the first 400)."
     public let parametersJSON = """
         {"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}},"required":["path"]}
         """
@@ -81,23 +120,26 @@ public struct ReadFileTool: ORTool {
     public func call(arguments: String) async throws -> String {
         let args = CodingTools.arguments(arguments)
         guard let path = args["path"] as? String else { throw ToolFailure(message: "read_file needs a path") }
-        let full = CodingTools.resolve(path, in: cwd)
+        let full = try CodingTools.resolve(path, in: cwd)
         guard let text = try? String(contentsOfFile: full, encoding: .utf8) else { throw ToolFailure(message: "cannot read \(full)") }
         let lines = text.components(separatedBy: "\n")
         let offset = max(1, (args["offset"] as? Int) ?? 1)
         let limit = max(1, (args["limit"] as? Int) ?? 400)
         guard offset <= lines.count else { return "(file has \(lines.count) lines)" }
-        let slice = lines[(offset - 1)..<min(lines.count, offset - 1 + limit)]
+        // The model's numbers are any integers at all: the end is found
+        // by comparing with what is left, never by adding to them.
+        let start = offset - 1
+        let end = limit < lines.count - start ? start + limit : lines.count
         var out = ""
-        for (i, line) in slice.enumerated() { out += "\(offset + i)\t\(line)\n" }
-        if offset - 1 + limit < lines.count { out += "… (\(lines.count - (offset - 1 + limit)) more lines)\n" }
+        for (i, line) in lines[start..<end].enumerated() { out += "\(offset + i)\t\(line)\n" }
+        if end < lines.count { out += "… (\(lines.count - end) more lines)\n" }
         return CodingTools.capped(out)
     }
 }
 
 public struct WriteFileTool: ORTool {
     public let name = "write_file"
-    public let toolDescription = "Write a whole text file, creating it and its folders as needed. Overwrites what was there."
+    public let toolDescription = "Write a whole text file in the working directory, creating it and its folders as needed. Overwrites what was there."
     public let parametersJSON = """
         {"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}
         """
@@ -108,7 +150,7 @@ public struct WriteFileTool: ORTool {
     public func call(arguments: String) async throws -> String {
         let args = CodingTools.arguments(arguments)
         guard let path = args["path"] as? String, let content = args["content"] as? String else { throw ToolFailure(message: "write_file needs path and content") }
-        let full = CodingTools.resolve(path, in: cwd)
+        let full = try CodingTools.resolve(path, in: cwd)
         try FileManager.default.createDirectory(atPath: (full as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
         try content.write(toFile: full, atomically: true, encoding: .utf8)
         return "wrote \(content.utf8.count) bytes to \(full)"
@@ -117,7 +159,7 @@ public struct WriteFileTool: ORTool {
 
 public struct EditFileTool: ORTool {
     public let name = "edit_file"
-    public let toolDescription = "Replace one exact occurrence of `old_string` in a file with `new_string`. Fails if the old text is missing or not unique; include enough context to make it unique."
+    public let toolDescription = "Replace one exact occurrence of `old_string` in a file in the working directory with `new_string`. Fails if the old text is missing or not unique; include enough context to make it unique."
     public let parametersJSON = """
         {"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"}},"required":["path","old_string","new_string"]}
         """
@@ -130,7 +172,7 @@ public struct EditFileTool: ORTool {
         guard let path = args["path"] as? String, let old = args["old_string"] as? String, let new = args["new_string"] as? String else {
             throw ToolFailure(message: "edit_file needs path, old_string and new_string")
         }
-        let full = CodingTools.resolve(path, in: cwd)
+        let full = try CodingTools.resolve(path, in: cwd)
         guard let text = try? String(contentsOfFile: full, encoding: .utf8) else { throw ToolFailure(message: "cannot read \(full)") }
         let count = text.components(separatedBy: old).count - 1
         guard count == 1 else { throw ToolFailure(message: count == 0 ? "old_string not found in \(full)" : "old_string occurs \(count) times in \(full); make it unique") }
@@ -142,7 +184,7 @@ public struct EditFileTool: ORTool {
 
 public struct ListDirectoryTool: ORTool {
     public let name = "list_directory"
-    public let toolDescription = "List a folder's entries (folders end with /). Defaults to the working directory."
+    public let toolDescription = "List a folder's entries (folders end with /): the working directory, or a folder inside it."
     public let parametersJSON = """
         {"type":"object","properties":{"path":{"type":"string"}}}
         """
@@ -152,7 +194,7 @@ public struct ListDirectoryTool: ORTool {
 
     public func call(arguments: String) async throws -> String {
         let args = CodingTools.arguments(arguments)
-        let full = CodingTools.resolve((args["path"] as? String) ?? ".", in: cwd)
+        let full = try CodingTools.resolve((args["path"] as? String) ?? ".", in: cwd)
         guard let names = try? FileManager.default.contentsOfDirectory(atPath: full) else { throw ToolFailure(message: "cannot list \(full)") }
         var lines: [String] = []
         for name in names.sorted() {

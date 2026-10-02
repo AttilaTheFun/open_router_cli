@@ -52,8 +52,11 @@ The model list (ids, names, prices per token, tool support) is kept in
 `openrouter models` or any headless run; Visor's model picker reads it.
 
 Sessions are kept in `~/.openrouter/sessions/<id>.json` — the messages,
-the folder, the model — and resumed by id. Tools run without asking; keep
-the agent in a folder you are happy for it to change.
+the folder, the model — and resumed by id (letters, digits, `-`, `_`
+and `.`; anything else is refused). Tools run without asking. The file
+tools reach only inside the session's folder, but bash runs whatever the
+model writes, as you: keep the agent in a folder you are happy for it to
+change, on a computer you are happy for it to use.
 
 ## Tests
 

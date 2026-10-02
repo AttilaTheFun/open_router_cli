@@ -51,6 +51,9 @@ actor Conversation {
             session = kept
         } else {
             session = ORSession(id: sessionID ?? ORSession.newID(), cwd: root, model: ORConfig.model(requested: requested))
+            // An id that cannot name a session file is refused now, not
+            // found out when the first save fails.
+            _ = try store.url(for: session.id)
         }
         let client = makeClient()
         self.store = store

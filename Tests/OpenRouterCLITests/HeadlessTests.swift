@@ -181,3 +181,18 @@ private func toolResult(_ line: [String: Any]) throws -> [String: Any] {
     #expect(lines[6]["result"] as? String == "The reply was cut off: the model reached its output limit.")
     #expect(try rig.store.load(id: rig.conversation.id).messages.map(\.content) == ["one", "two", "As far as it got"])
 }
+
+/// A session id from the command line that is not a file name is refused
+/// when the conversation is opened, whether to resume or to start.
+@Test func aSessionIdThatIsNotAFileNameIsRefused() throws {
+    let base = try scratch()
+    let store = ORSessionStore(directory: base.appendingPathComponent("sessions"))
+    #expect(throws: ORSessionError.invalidID("../../etc/passwd")) {
+        _ = try Conversation(resume: "../../etc/passwd", sessionID: nil, cwd: base.path, model: "m", effort: nil, store: store)
+    }
+    #expect(throws: ORSessionError.invalidID("../escape")) {
+        _ = try Conversation(resume: nil, sessionID: "../escape", cwd: base.path, model: "m", effort: nil, store: store)
+    }
+    let named = try Conversation(resume: nil, sessionID: "named-by-the-host", cwd: base.path, model: "m", effort: nil, store: store)
+    #expect(named.id == "named-by-the-host")
+}
