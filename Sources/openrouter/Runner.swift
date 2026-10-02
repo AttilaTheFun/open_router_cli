@@ -42,9 +42,11 @@ actor Conversation {
     ///   - resume: a session id to carry on (its file must exist).
     ///   - sessionID: the id a new session should have (a host that names them).
     ///   - store: where sessions are kept.
+    ///   - maxRounds: how many rounds of tool calls a turn may take
+    ///     (`--max-turns`); the agent's own limit when nil.
     ///   - makeClient: the client, made afresh for each turn with the key
     ///     as it is then.
-    init(resume: String?, sessionID: String?, cwd: String, model requested: String?, effort: String?,
+    init(resume: String?, sessionID: String?, cwd: String, model requested: String?, effort: String?, maxRounds: Int? = nil,
          store: ORSessionStore = ORSessionStore(), makeClient: @escaping @Sendable () -> OpenRouterClient = { OpenRouterClient() }) throws {
         let root = (cwd as NSString).expandingTildeInPath
         let session: ORSession
@@ -67,7 +69,7 @@ actor Conversation {
         self.cwd = root
         agent = ORAgent(client: client, model: session.model, tools: CodingTools.standard(cwd: root),
                         systemPrompt: Self.systemPrompt.replacingOccurrences(of: "%CWD%", with: root),
-                        history: session.messages, reasoningEffort: Self.effort(effort))
+                        history: session.messages, reasoningEffort: Self.effort(effort), maxRounds: maxRounds ?? ORAgent.defaultMaxRounds)
         logged = store.loggedCount(id: session.id)
     }
 
@@ -173,9 +175,13 @@ final class Output: Sendable {
 
 /// A turn's events as stream-json lines: the message boundaries, and the
 /// usage that goes on the finished message. A message's lines carry the
-/// id the agent gave it.
+/// id the agent gave it. The reply's text as it is written (the
+/// `stream_event` lines) is printed only when asked for, as Claude Code
+/// prints it only with `--include-partial-messages`; the finished
+/// messages always are.
 actor StreamJSONTurn {
     private let model: String
+    private let partialMessages: Bool
     private let output: Output
     /// The message whose `message_start` has been written and whose
     /// `assistant` line has not.
@@ -184,13 +190,14 @@ actor StreamJSONTurn {
     /// The text of the last assistant message: what the result carries.
     private(set) var lastText = ""
 
-    init(model: String, output: Output) {
+    init(model: String, partialMessages: Bool, output: Output) {
         self.model = model
+        self.partialMessages = partialMessages
         self.output = output
     }
 
     private func start(_ id: String) {
-        guard open != id else { return }
+        guard partialMessages, open != id else { return }
         open = id
         output.line(StreamJSON.messageStart(id: id))
     }
@@ -198,6 +205,7 @@ actor StreamJSONTurn {
     func handle(_ event: ORAgentEvent) {
         switch event {
         case .delta(let text, let id):
+            guard partialMessages else { break }
             start(id)
             output.line(StreamJSON.textDelta(text))
         case .usage(let prompt, let completion):
@@ -223,13 +231,19 @@ actor StreamJSONTurn {
 actor HeadlessRunner {
     private let conversation: Conversation
     private let streamOut: Bool
+    private let partialMessages: Bool
     private let output: Output
     private var queue: [String] = []
     private var current: Task<Void, Never>?
 
-    init(conversation: Conversation, streamOut: Bool, output: Output) {
+    /// - Parameters:
+    ///   - streamOut: stream-json on stdout, rather than the reply's text.
+    ///   - partialMessages: with stream-json, the reply's text as it is
+    ///     written too (`--include-partial-messages`).
+    init(conversation: Conversation, streamOut: Bool, partialMessages: Bool, output: Output) {
         self.conversation = conversation
         self.streamOut = streamOut
+        self.partialMessages = partialMessages
         self.output = output
     }
 
@@ -264,7 +278,7 @@ actor HeadlessRunner {
     @discardableResult
     func turn(_ text: String) async -> Bool {
         let id = conversation.id
-        let lines = StreamJSONTurn(model: await conversation.model, output: output)
+        let lines = StreamJSONTurn(model: await conversation.model, partialMessages: partialMessages, output: output)
         do {
             try await conversation.run(text) { [streamOut, output] event in
                 if streamOut {
@@ -273,11 +287,13 @@ actor HeadlessRunner {
                     output.text(piece)
                 }
             }
-            if streamOut { output.line(StreamJSON.result(isError: false, text: await lines.lastText, sessionID: id)) } else { output.text("\n") }
+            if streamOut { output.line(StreamJSON.result(.success, text: await lines.lastText, sessionID: id)) } else { output.text("\n") }
             return true
         } catch {
             let message = error is CancellationError ? "Interrupted" : (error as? LocalizedError)?.errorDescription ?? "\(error)"
-            if streamOut { output.line(StreamJSON.result(isError: true, text: message, sessionID: id)) } else { output.error(message) }
+            // Out of rounds is the one failure Claude Code names apart.
+            let kind: StreamJSON.ResultKind = if case ORAgentError.tooManyRounds = error { .errorMaxTurns } else { .errorDuringExecution }
+            if streamOut { output.line(StreamJSON.result(kind, text: message, sessionID: id)) } else { output.error(message) }
             return false
         }
     }

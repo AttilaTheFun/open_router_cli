@@ -35,6 +35,22 @@ same file is the default model. `OPENROUTER_HOME` moves the folder.
     openrouter -p "what does this repo do?"     one turn, headless
     openrouter -p --input-format stream-json --output-format stream-json --include-partial-messages [--resume <id>]
                                                 Claude Code's protocol on stdin/stdout (what Visor runs)
+    openrouter --help                           every command and option
+
+### Claude Code's options
+
+A host that drives `claude -p` passes it options, and `openrouter` takes
+the same command line. What each does here:
+
+| Option | Here |
+| --- | --- |
+| `-p`, `--input-format`, `--output-format`, `--model`, `--effort`, `--resume`, `--session-id` | As in Claude Code. |
+| `--include-partial-messages` | As in Claude Code: with stream-json output, the reply's text as it is written (`stream_event` lines). Without it only whole messages are printed. |
+| `--max-turns N` | The rounds of tool calls a turn may take (default 24); a turn that uses them all ends with an `error_max_turns` result. |
+| `--permission-mode`, `--permission-prompt-tool` | **Taken and not acted on.** openrouter has one mode: its tools run without asking, and nothing is ever sent to a permission prompt tool. The `init` line says `"permissionMode":"bypassPermissions"` whatever was asked, and a mode other than that is noted on stderr. A host's "ask first" setting does not hold for an openrouter session. |
+| `--mcp-config` | **Taken and not acted on.** openrouter does not connect to MCP servers; the model has the coding tools and no others (`"mcp_servers":[]` in the `init` line). Noted on stderr. |
+| `--verbose`, `--dangerously-skip-permissions` | Taken; nothing to change (stream-json output is always whole, and tools already run without asking). |
+| anything else | Ignored, and noted on stderr. An option that needs a value and has none, or a `--max-turns` that is not a number above zero, is refused (exit 2). |
 
 Headless, a turn ends with a `result` line. An interrupt (a
 `control_request` with subtype `interrupt` on stdin) stops the turn in

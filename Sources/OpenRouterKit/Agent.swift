@@ -81,7 +81,8 @@ public actor ORAgent {
     /// - Parameter history: messages already had (resuming a conversation),
     ///   without the system prompt: what `history` gives back.
     public init(client: OpenRouterClient, model: String, tools: [any ORTool] = [], systemPrompt: String? = nil,
-                history: [ORMessage] = [], temperature: Double? = nil, reasoningEffort: String? = nil, maxRounds: Int = 24) {
+                history: [ORMessage] = [], temperature: Double? = nil, reasoningEffort: String? = nil,
+                maxRounds: Int = ORAgent.defaultMaxRounds) {
         self.client = client
         self.model = model
         self.tools = tools
@@ -91,6 +92,9 @@ public actor ORAgent {
         toolsByName = Dictionary(tools.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
         messages = (systemPrompt.map { [ORMessage(role: .system, content: $0)] } ?? []) + history
     }
+
+    /// How many tool rounds a turn may take when nothing else is said.
+    public static let defaultMaxRounds = 24
 
     /// An id for an assistant message: "msg_or_" and 32 hex digits.
     static func newMessageID() -> String {

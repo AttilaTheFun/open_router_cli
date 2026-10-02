@@ -1,72 +1,51 @@
 // openrouter: a coding agent on OpenRouter's models, in the terminal and
 // headless. Configured on its own (`openrouter auth login`), the way
-// `claude` and `codex` are; a host such as Visor only runs it.
-//
-//   openrouter [--model M] [--effort E] [--resume ID] [--cwd DIR]     chat here
-//   openrouter resume ID                                              carry a session on
-//   openrouter -p [PROMPT] [--output-format text|stream-json]         one turn, headless
-//   openrouter -p --input-format stream-json --output-format stream-json --include-partial-messages
-//                                                                     Claude Code's protocol on stdin/stdout
-//   openrouter auth status | login [KEY] | logout
-//   openrouter models [--free] [--tools] [--json]
-//   openrouter sessions [--cwd DIR] [--json]
+// `claude` and `codex` are; a host such as Visor only runs it. `usage()`
+// below is the list of what it takes; Options.swift says which of Claude
+// Code's options are taken and not acted on.
 
 import Foundation
 import OpenRouterKit
 
 let version = "0.2.0"
 
-struct Options {
-    var command: String?
-    var positional: [String] = []
-    var values: [String: String] = [:]
-    var flags: Set<String> = []
-
-    /// Flags that take a value; any other `--flag` is a switch (and an
-    /// unknown one is ignored, so a host's extra flags do no harm).
-    static let valued: Set<String> = ["model", "effort", "resume", "session-id", "cwd", "input-format", "output-format",
-                                      "permission-mode", "mcp-config", "permission-prompt-tool", "max-turns", "key"]
-
-    init(_ arguments: [String]) {
-        var rest = arguments[...]
-        if let first = rest.first, !first.hasPrefix("-"), ["auth", "models", "sessions", "resume", "help", "version"].contains(first) {
-            command = first
-            rest = rest.dropFirst()
-        }
-        while let argument = rest.first {
-            rest = rest.dropFirst()
-            if argument == "-p" || argument == "--print" { flags.insert("p"); continue }
-            if argument == "-m", let value = rest.first { values["model"] = value; rest = rest.dropFirst(); continue }
-            guard argument.hasPrefix("--") else { positional.append(argument); continue }
-            let name = String(argument.dropFirst(2))
-            if let equals = name.firstIndex(of: "=") {
-                values[String(name[..<equals])] = String(name[name.index(after: equals)...])
-            } else if Self.valued.contains(name), let value = rest.first {
-                values[name] = value
-                rest = rest.dropFirst()
-            } else {
-                flags.insert(name)
-            }
-        }
-    }
-}
-
-let options = Options(Array(CommandLine.arguments.dropFirst()))
 let output = Output.standard
+let options: Options
+do {
+    options = try Options(Array(CommandLine.arguments.dropFirst()))
+} catch {
+    output.error("openrouter: \(error.localizedDescription) (openrouter --help lists the options)")
+    exit(2)
+}
 
 func usage() {
     output.line("""
         openrouter \(version) — a coding agent on OpenRouter's models
           openrouter [--model M] [--effort E] [--resume ID] [--cwd DIR]   chat in this folder
           openrouter resume ID                                            carry a session on
-          openrouter -p [PROMPT] [--output-format text|stream-json]       one turn, headless
+          openrouter -p [PROMPT] [--output-format text|stream-json]       one turn, headless (exits 1 if it fails)
           openrouter -p --input-format stream-json --output-format stream-json --include-partial-messages
                                                                           Claude Code's stream-json protocol on stdin/stdout
           openrouter auth status | login [KEY] | logout                   the key (or OPENROUTER_API_KEY)
           openrouter models [--free] [--tools] [--json] [--refresh]       what OpenRouter offers (kept in ~/.openrouter/models.json)
           openrouter sessions [--cwd DIR] [--json]                        sessions kept in ~/.openrouter/sessions
+        Options:
+          --model M, -m M              the model (default: the config's, else \(ORConfig.defaultModel))
+          --effort low|medium|high     reasoning effort, for models that take one (xhigh and max read as high)
+          --resume ID, --session-id ID carry a session on; the id a new session gets
+          --cwd DIR                    the folder to work in (default: this one)
+          --max-turns N                rounds of tool calls a turn may take (default 24)
+          --include-partial-messages   with stream-json output: the reply's text as it is written
+        Tools run without asking; openrouter has no permission modes and no MCP. Claude Code's
+        --permission-mode, --permission-prompt-tool, --mcp-config, --verbose and --dangerously-skip-permissions
+        are taken, so that a host's command line works, and change nothing; the first three are noted on stderr.
         Config: ~/.openrouter/config.json ({"apiKey": …, "model": …}); OPENROUTER_HOME moves it.
         """)
+}
+
+/// Says, on stderr, which of the options given will not do what they say.
+func note(_ options: Options) {
+    for note in options.notes { output.error("openrouter: " + note) }
 }
 
 func readSecret(prompt: String) -> String {
@@ -161,14 +140,15 @@ func sessions() -> Int32 {
 func headless() async -> Int32 {
     let streamIn = options.values["input-format"] == "stream-json"
     let streamOut = options.values["output-format"] == "stream-json"
+    note(options)
     let conversation: Conversation
     do {
         conversation = try Conversation(resume: options.values["resume"], sessionID: options.values["session-id"],
                                         cwd: options.values["cwd"] ?? FileManager.default.currentDirectoryPath,
-                                        model: options.values["model"], effort: options.values["effort"])
+                                        model: options.values["model"], effort: options.values["effort"], maxRounds: options.maxTurns)
     } catch {
         let message = "Could not open the session: \(error.localizedDescription)"
-        if streamOut { output.line(StreamJSON.result(isError: true, text: message, sessionID: options.values["resume"] ?? "")) } else { output.error(message) }
+        if streamOut { output.line(StreamJSON.result(.errorDuringExecution, text: message, sessionID: options.values["resume"] ?? "")) } else { output.error(message) }
         return 1
     }
     if streamOut {
@@ -177,7 +157,8 @@ func headless() async -> Int32 {
     }
     // A host reads the model list from disk; keep it no older than a day.
     if ORModelCache.isStale, await conversation.hasKey { Task.detached { _ = try? await ORModelCache.refresh() } }
-    let runner = HeadlessRunner(conversation: conversation, streamOut: streamOut, output: output)
+    let runner = HeadlessRunner(conversation: conversation, streamOut: streamOut,
+                                partialMessages: options.flags.contains("include-partial-messages"), output: output)
     if streamIn {
         do {
             for try await line in FileHandle.standardInput.bytes.lines {
@@ -206,11 +187,12 @@ func headless() async -> Int32 {
 
 /// The terminal chat: type, watch the reply stream, see the tools run.
 func chat(resume: String?) async -> Int32 {
+    note(options)
     let conversation: Conversation
     do {
         conversation = try Conversation(resume: resume, sessionID: options.values["session-id"],
                                         cwd: options.values["cwd"] ?? FileManager.default.currentDirectoryPath,
-                                        model: options.values["model"], effort: options.values["effort"])
+                                        model: options.values["model"], effort: options.values["effort"], maxRounds: options.maxTurns)
     } catch {
         output.error("Could not open the session: \(error.localizedDescription)")
         return 1
@@ -255,7 +237,7 @@ func chat(resume: String?) async -> Int32 {
 }
 
 if options.flags.contains("version") || options.command == "version" { output.line(version); exit(0) }
-if options.flags.contains("help") || options.flags.contains("h") || options.command == "help" { usage(); exit(0) }
+if options.flags.contains("help") || options.command == "help" { usage(); exit(0) }
 
 let status: Int32
 switch options.command {
