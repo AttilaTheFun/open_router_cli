@@ -9,7 +9,8 @@
 //   {"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":…}}}
 //   {"type":"assistant","message":{"id":…,"model":…,"usage":{…},"content":[{"type":"text",…},{"type":"tool_use",…}]}}
 //   {"type":"user","uuid":…,"message":{"content":[{"type":"tool_result","tool_use_id":…,"content":…}]}}
-//   {"type":"result","is_error":false,"result":…}
+//   {"type":"result","subtype":"success","is_error":false,"result":…}
+//   {"type":"result","subtype":"error_during_execution","is_error":true,"result":…}   (a failed or interrupted turn)
 // In (stdin):
 //   {"type":"user","message":{"role":"user","content":[{"type":"text","text":…}]}}   (or "content":"…")
 //   {"type":"control_request","request_id":…,"request":{"subtype":"interrupt"}}

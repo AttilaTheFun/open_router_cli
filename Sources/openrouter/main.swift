@@ -200,9 +200,8 @@ func headless() async -> Int32 {
         prompt = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
     }
     guard !prompt.isEmpty else { output.error("Nothing to say: give a prompt, or pipe one in."); return 2 }
-    await runner.enqueue(prompt)
-    await runner.drain()
-    return 0
+    // One turn: its failure is the command's.
+    return await runner.turn(prompt) ? 0 : 1
 }
 
 /// The terminal chat: type, watch the reply stream, see the tools run.
@@ -241,7 +240,7 @@ func chat(resume: String?) async -> Int32 {
                     let object = (try? JSONSerialization.jsonObject(with: Data(arguments.utf8))) as? [String: Any]
                     let summary = (object?["command"] ?? object?["path"]) as? String ?? ""
                     output.text("\n[\(name)] \(summary)\n")
-                case .toolResult(_, let result, _):
+                case .toolResult(_, let result, _, _):
                     let first = result.split(separator: "\n").prefix(3).joined(separator: "\n")
                     output.text("  \(first.replacingOccurrences(of: "\n", with: "\n  "))\n")
                 case .started, .message, .assistant, .usage: break

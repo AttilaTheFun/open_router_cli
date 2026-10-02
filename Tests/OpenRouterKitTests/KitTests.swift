@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import OpenRouterKit
+import TestSupport
 
 // MARK: Sessions
 
@@ -137,7 +138,7 @@ import Testing
         case .started: "started"
         case .assistant(let message): "assistant:\(message.content ?? "")/\(message.toolCalls?.count ?? 0)"
         case .toolCall(let name, _, _): "call:" + name
-        case .toolResult(let name, _, _): "result:" + name
+        case .toolResult(let name, _, _, _): "result:" + name
         case .delta, .message, .usage: nil
         }
     }

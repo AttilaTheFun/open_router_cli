@@ -6,6 +6,7 @@
 import Foundation
 import Testing
 @testable import OpenRouterKit
+import TestSupport
 
 private func json(_ object: [String: Any]) throws -> String {
     String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
