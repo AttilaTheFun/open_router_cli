@@ -167,7 +167,7 @@ import TestSupport
         [try sse(["choices": [["delta": ["content": "done"], "finish_reason": "stop"]]]), "data: [DONE]"],
     ])
     let agent = ORAgent(client: OpenRouterClient(apiKey: "k", transport: mock), model: "m", tools: [EchoTool()])
-    let recorder = Recorder()
+    let recorder = Recorder<ORAgentEvent>()
     try await agent.send("go") { await recorder.add($0) }
     let order: [String] = await recorder.events.compactMap { event in
         switch event {
@@ -198,7 +198,7 @@ import TestSupport
         try reply("really done"),
     ])
     let agent = ORAgent(client: OpenRouterClient(apiKey: "k", transport: mock), model: "m", tools: [EchoTool()])
-    let recorder = Recorder()
+    let recorder = Recorder<ORAgentEvent>()
     try await agent.send("go") { await recorder.add($0) }
     try await agent.send("again") { await recorder.add($0) }
     // Each message's ids, in the order its events came: deltas, then the message whole.

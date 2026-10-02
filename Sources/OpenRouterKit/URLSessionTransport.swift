@@ -11,21 +11,9 @@ public struct URLSessionTransport: ORTransport {
         return (data, try Self.http(response))
     }
 
-    public func lines(for request: URLRequest) async throws -> (AsyncThrowingStream<String, Error>, HTTPURLResponse) {
+    public func lines(for request: URLRequest) async throws -> (any AsyncSequence<String, any Error> & Sendable, HTTPURLResponse) {
         let (bytes, response) = try await session.bytes(for: request)
-        let http = try Self.http(response)
-        let stream = AsyncThrowingStream<String, Error> { continuation in
-            let task = Task {
-                do {
-                    for try await line in bytes.lines { continuation.yield(line) }
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
-            }
-            continuation.onTermination = { _ in task.cancel() }
-        }
-        return (stream, http)
+        return (bytes.lines, try Self.http(response))
     }
 
     /// The response as HTTP's, which the API's always is; anything else is

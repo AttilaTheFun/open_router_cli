@@ -46,7 +46,7 @@ private struct CountTool: ORTool {
     let counter = Counter()
     let agent = ORAgent(client: OpenRouterClient(apiKey: "k", transport: mock), model: "m",
                         tools: [WaitTool(started: signal), CountTool(counter: counter)])
-    let recorder = Recorder()
+    let recorder = Recorder<ORAgentEvent>()
     let turn = Task { try await agent.send("go") { await recorder.add($0) } }
     for await _ in started { break }
     turn.cancel()

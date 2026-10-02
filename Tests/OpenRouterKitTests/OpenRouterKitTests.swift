@@ -11,17 +11,11 @@ import TestSupport
         "data: [DONE]",
     ]])
     let client = OpenRouterClient(apiKey: "k", transport: mock)
-    var text = ""
-    var finishedText: String?
-    for try await event in client.stream(ORChatRequest(model: "m", messages: [ORMessage(role: .user, content: "hi")])) {
-        switch event {
-        case .token(let t): text += t
-        case .finished(_, let message): finishedText = message.content
-        default: break
-        }
-    }
-    #expect(text == "Hello")
-    #expect(finishedText == "Hello")
+    let recorder = Recorder<ORStreamEvent>()
+    let completion = try await client.complete(ORChatRequest(model: "m", messages: [ORMessage(role: .user, content: "hi")])) { await recorder.add($0) }
+    let tokens: [String] = await recorder.events.compactMap { if case .token(let text) = $0 { text } else { nil } }
+    #expect(tokens == ["Hel", "lo"])
+    #expect(completion == ORCompletion(message: ORMessage(role: .assistant, content: "Hello"), finishReason: "stop"))
 }
 
 @Test func assemblesStreamedToolCallThenRunsIt() async throws {
@@ -41,7 +35,7 @@ import TestSupport
         ],
     ])
     let agent = ORAgent(client: OpenRouterClient(apiKey: "k", transport: mock), model: "m", tools: [EchoTool()])
-    let recorder = Recorder()
+    let recorder = Recorder<ORAgentEvent>()
     try await agent.send("please echo") { await recorder.add($0) }
     var calls: [String] = []
     var results: [String] = []
@@ -98,7 +92,7 @@ import TestSupport
     let mock = MockTransport(streams: [["unauthorized"]], status: 401)
     let client = OpenRouterClient(apiKey: "bad", transport: mock)
     let error = await #expect(throws: OpenRouterError.self) {
-        for try await _ in client.stream(ORChatRequest(model: "m", messages: [])) {}
+        _ = try await client.complete(ORChatRequest(model: "m", messages: [])) { _ in }
     }
     #expect(error?.status == 401)
     #expect(error?.body == "unauthorized")

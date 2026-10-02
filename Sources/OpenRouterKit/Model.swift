@@ -221,18 +221,21 @@ public struct ORChatRequest: Sendable {
     }
 }
 
-/// One piece of a streamed completion.
+/// One piece of a completion, as it is streamed.
 public enum ORStreamEvent: Sendable {
     /// More assistant text.
     case token(String)
-    /// A tool call, assembled from its streamed fragments.
-    case toolCall(ORToolCall)
-    /// The completion ended; the reason the API gave ("stop",
-    /// "tool_calls", "length", "content_filter"), and the assistant
-    /// message as it finished (text and any tool calls).
-    case finished(reason: String?, message: ORMessage)
     /// The tokens the request and reply used, when reported.
     case usage(prompt: Int, completion: Int)
+}
+
+/// A completion, whole.
+public struct ORCompletion: Sendable, Equatable {
+    /// The assistant message: its text and any tool calls.
+    public let message: ORMessage
+    /// Why the model stopped, as the API gives it ("stop", "tool_calls",
+    /// "length", "content_filter"); nil when it gave no reason.
+    public let finishReason: String?
 }
 
 /// The API refused a request: the HTTP status and the body it sent.

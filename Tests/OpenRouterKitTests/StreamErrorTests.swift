@@ -6,23 +6,21 @@ import Testing
 @testable import OpenRouterKit
 import TestSupport
 
-private func chat(_ transport: MockTransport) -> AsyncThrowingStream<ORStreamEvent, Error> {
-    OpenRouterClient(apiKey: "k", transport: transport).stream(ORChatRequest(model: "m", messages: [ORMessage(role: .user, content: "hi")]))
-}
-
-/// The text of the tokens, and the finished message with its reason; throws what the stream throws.
-private func collect(_ stream: AsyncThrowingStream<ORStreamEvent, Error>) async throws -> (tokens: String, reason: String?, message: ORMessage?) {
+/// One completion over a transport: the text of its tokens, the usage
+/// reported, and the completion; throws what the client throws.
+private func complete(_ transport: MockTransport) async throws -> (tokens: String, usage: [Int], completion: ORCompletion) {
+    let recorder = Recorder<ORStreamEvent>()
+    let request = ORChatRequest(model: "m", messages: [ORMessage(role: .user, content: "hi")])
+    let completion = try await OpenRouterClient(apiKey: "k", transport: transport).complete(request) { await recorder.add($0) }
     var tokens = ""
-    var reason: String?
-    var message: ORMessage?
-    for try await event in stream {
+    var usage: [Int] = []
+    for event in await recorder.events {
         switch event {
         case .token(let text): tokens += text
-        case .finished(let why, let whole): (reason, message) = (why, whole)
-        case .toolCall, .usage: break
+        case .usage(let prompt, let completion): usage = [prompt, completion]
         }
     }
-    return (tokens, reason, message)
+    return (tokens, usage, completion)
 }
 
 private let hello = ["choices": [["delta": ["content": "Hello"]]]]
@@ -32,21 +30,20 @@ private let hello = ["choices": [["delta": ["content": "Hello"]]]]
 @Test func aStreamThatEndsBeforeTheCompletionThrows() async throws {
     // The connection dropped after some text: no finish reason, no [DONE].
     let mock = MockTransport(streams: [[try sse(hello)]])
-    await #expect(throws: ORStreamError.incomplete) { _ = try await collect(chat(mock)) }
+    await #expect(throws: ORStreamError.incomplete) { _ = try await complete(mock) }
     // Nothing at all came.
-    await #expect(throws: ORStreamError.incomplete) { _ = try await collect(chat(MockTransport(streams: [[]]))) }
+    await #expect(throws: ORStreamError.incomplete) { _ = try await complete(MockTransport(streams: [[]])) }
 }
 
 @Test func eitherTheFinishReasonOrDoneEndsACompletion() async throws {
     let reasonOnly = MockTransport(streams: [[try sse(hello), try sse(["choices": [["delta": [String: Any](), "finish_reason": "stop"]]])]])
-    let first = try await collect(chat(reasonOnly))
-    #expect(first.reason == "stop")
-    #expect(first.message == ORMessage(role: .assistant, content: "Hello"))
+    let first = try await complete(reasonOnly)
+    #expect(first.tokens == "Hello")
+    #expect(first.completion == ORCompletion(message: ORMessage(role: .assistant, content: "Hello"), finishReason: "stop"))
 
     let doneOnly = MockTransport(streams: [[try sse(hello), "data: [DONE]"]])
-    let second = try await collect(chat(doneOnly))
-    #expect(second.reason == nil)
-    #expect(second.message == ORMessage(role: .assistant, content: "Hello"))
+    let second = try await complete(doneOnly)
+    #expect(second.completion == ORCompletion(message: ORMessage(role: .assistant, content: "Hello"), finishReason: nil))
 }
 
 @Test func anErrorInTheStreamThrowsIt() async throws {
@@ -54,20 +51,20 @@ private let hello = ["choices": [["delta": ["content": "Hello"]]]]
     let failed: [String: Any] = ["error": ["code": 502, "message": "Provider disconnected"],
                                  "choices": [["delta": ["content": ""], "finish_reason": "error"]]]
     let mock = MockTransport(streams: [[try sse(hello), try sse(failed), "data: [DONE]"]])
-    let error = await #expect(throws: ORStreamError.self) { _ = try await collect(chat(mock)) }
+    let error = await #expect(throws: ORStreamError.self) { _ = try await complete(mock) }
     #expect(error == .failed(code: "502", message: "Provider disconnected"))
     #expect(error?.errorDescription == "OpenRouter failed during the reply: Provider disconnected (502)")
 
     // A code that is a word, and a finish reason of "error" with no error object.
     let worded = MockTransport(streams: [[try sse(["error": ["code": "rate_limited", "message": "Slow down"]])]])
-    await #expect(throws: ORStreamError.failed(code: "rate_limited", message: "Slow down")) { _ = try await collect(chat(worded)) }
+    await #expect(throws: ORStreamError.failed(code: "rate_limited", message: "Slow down")) { _ = try await complete(worded) }
     let bare = MockTransport(streams: [[try sse(["choices": [["delta": [String: Any](), "finish_reason": "error"]]]), "data: [DONE]"]])
-    await #expect(throws: ORStreamError.failed(code: nil, message: "the provider ended the reply with an error")) { _ = try await collect(chat(bare)) }
+    await #expect(throws: ORStreamError.failed(code: nil, message: "the provider ended the reply with an error")) { _ = try await complete(bare) }
 }
 
 @Test func aDataLineThatIsNotACompletionThrows() async throws {
     let mock = MockTransport(streams: [[try sse(hello), "data: <html>Bad Gateway</html>", "data: [DONE]"]])
-    await #expect(throws: ORStreamError.malformed("<html>Bad Gateway</html>")) { _ = try await collect(chat(mock)) }
+    await #expect(throws: ORStreamError.malformed("<html>Bad Gateway</html>")) { _ = try await complete(mock) }
 }
 
 @Test func commentsAndBlankLinesAreNotData() async throws {
@@ -75,25 +72,33 @@ private let hello = ["choices": [["delta": ["content": "Hello"]]]]
                                         try sse(["choices": [["delta": [String: Any](), "finish_reason": "stop"]]]),
                                         try sse(["choices": [[String: Any]](), "usage": ["prompt_tokens": 7, "completion_tokens": 2]]),
                                         "data: [DONE]"]])
-    var usage: [Int] = []
-    var text = ""
-    for try await event in chat(mock) {
-        switch event {
-        case .usage(let prompt, let completion): usage = [prompt, completion]
-        case .token(let piece): text += piece
-        case .finished, .toolCall: break
-        }
+    let whole = try await complete(mock)
+    #expect(whole.tokens == "Hello")
+    #expect(whole.usage == [7, 2])
+    #expect(whole.completion.finishReason == "stop")
+}
+
+/// Cancelling the task that asked stops the reading, and is a
+/// cancellation, not a reply cut short.
+@Test(.timeLimit(.minutes(1))) func aCancelledCompletionThrowsCancellation() async throws {
+    let mock = MockTransport(streams: [[try sse(hello), MockTransport.stall]])
+    let (tokens, signal) = AsyncStream.makeStream(of: Void.self)
+    let asking = Task {
+        try await OpenRouterClient(apiKey: "k", transport: mock).complete(ORChatRequest(model: "m", messages: [])) { _ in signal.yield() }
     }
-    #expect(text == "Hello")
-    #expect(usage == [7, 2])
+    for await _ in tokens { break }
+    asking.cancel()
+    await #expect(throws: CancellationError.self) { _ = try await asking.value }
 }
 
 /// A response that is not HTTP's has no status to call a success.
 @Test func aResponseThatIsNotHTTPIsRefused() async throws {
     let file = try scratch().appendingPathComponent("models.json")
     try Data(#"{"data":[]}"#.utf8).write(to: file)
-    await #expect(throws: URLError.self) { _ = try await URLSessionTransport().data(for: URLRequest(url: file)) }
-    await #expect(throws: URLError.self) { _ = try await URLSessionTransport().lines(for: URLRequest(url: file)) }
+    let whole = await #expect(throws: URLError.self) { _ = try await URLSessionTransport().data(for: URLRequest(url: file)) }
+    let streamed = await #expect(throws: URLError.self) { _ = try await URLSessionTransport().lines(for: URLRequest(url: file)) }
+    #expect(whole?.code == .badServerResponse)
+    #expect(streamed?.code == .badServerResponse)
 }
 
 // MARK: The agent
@@ -101,7 +106,7 @@ private let hello = ["choices": [["delta": ["content": "Hello"]]]]
 @Test func aTruncatedReplyFailsTheTurn() async throws {
     let mock = MockTransport(streams: [[try sse(hello)], try reply("whole")])
     let agent = ORAgent(client: OpenRouterClient(apiKey: "k", transport: mock), model: "m")
-    let recorder = Recorder()
+    let recorder = Recorder<ORAgentEvent>()
     await #expect(throws: ORStreamError.incomplete) { try await agent.send("hi") { await recorder.add($0) } }
     // No assistant message was announced or kept; the user's is.
     #expect(await recorder.events.contains { if case .assistant = $0 { true } else { false } } == false)
@@ -130,7 +135,7 @@ private let hello = ["choices": [["delta": ["content": "Hello"]]]]
         "data: [DONE]",
     ]])
     let agent = ORAgent(client: OpenRouterClient(apiKey: "k", transport: mock), model: "m", tools: [EchoTool()])
-    let recorder = Recorder()
+    let recorder = Recorder<ORAgentEvent>()
     await #expect(throws: ORAgentError.replyCutOff(reason: "length")) { try await agent.send("hi") { await recorder.add($0) } }
     #expect(await agent.history == [ORMessage(role: .user, content: "hi"), ORMessage(role: .assistant, content: "Writing. ")])
     #expect(await recorder.events.contains { if case .toolCall = $0 { true } else { false } } == false)
