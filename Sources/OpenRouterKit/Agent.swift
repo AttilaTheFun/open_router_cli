@@ -130,14 +130,7 @@ public actor ORAgent {
         defer { isRunning = false }
         messages.append(ORMessage(role: .user, content: userText))
         await onEvent(.started)
-        do {
-            try await rounds(onEvent)
-        } catch where Task.isCancelled {
-            // Whatever a cancelled turn threw on its way out (the
-            // transport has its own errors for it), it ended because it
-            // was cancelled.
-            throw CancellationError()
-        }
+        try await rounds(onEvent)
     }
 
     private func rounds(_ onEvent: @Sendable (ORAgentEvent) async -> Void) async throws {

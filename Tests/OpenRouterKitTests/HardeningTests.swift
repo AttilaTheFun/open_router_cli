@@ -253,3 +253,14 @@ func anIdThatIsAFileNameIsTaken(id: String) throws {
     }
     #expect(try folders.outsideNames() == before)
 }
+
+/// A NUL in a path ends it for the system and not for Swift: the name
+/// that is checked and the file that is opened could differ. No path has
+/// one.
+@Test func aPathWithANulInItIsRefused() async throws {
+    let folders = try Folders()
+    for path in ["secret-link\u{0}x", "out\u{0}/x", "sub/in.txt\u{0}"] {
+        #expect(throws: ToolFailure.self) { try CodingTools.resolve(path, in: folders.root.path) }
+        await #expect(throws: ToolFailure.self) { _ = try await ReadFileTool(cwd: folders.root.path).call(arguments: try json(["path": path])) }
+    }
+}

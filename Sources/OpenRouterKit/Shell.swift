@@ -50,17 +50,19 @@ enum Shell {
         case graceOver
     }
 
-    /// Runs `command` with `zsh -lc` in `cwd`, with no input, and returns
-    /// when the shell has exited and its output has been read. Past
-    /// `timeout`, or when the calling task is cancelled, the command is
-    /// stopped: the outcome says which.
-    static func run(_ command: String, cwd: String, timeout: Duration, keep: Int) async throws -> ShellOutcome {
+    /// Runs `command` with `zsh -lc` in `cwd`, with no input and in
+    /// `environment` (this process's own when nil), and returns when the
+    /// shell has exited and its output has been read. Past `timeout`, or
+    /// when the calling task is cancelled, the command is stopped: the
+    /// outcome says which.
+    static func run(_ command: String, cwd: String, environment: [String: String]?, timeout: Duration, keep: Int) async throws -> ShellOutcome {
         // A task already cancelled starts nothing.
         try Task.checkCancellation()
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
         process.arguments = ["-lc", command]
         process.currentDirectoryURL = URL(fileURLWithPath: cwd)
+        if let environment { process.environment = environment }
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe

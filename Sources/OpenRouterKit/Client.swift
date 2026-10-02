@@ -82,6 +82,17 @@ public struct OpenRouterClient: Sendable {
     /// the reading: what is returned is only ever a completion the API
     /// said was complete.
     public func complete(_ chat: ORChatRequest, onEvent: @Sendable (ORStreamEvent) async -> Void) async throws -> ORCompletion {
+        do {
+            return try await read(chat, onEvent: onEvent)
+        } catch where Task.isCancelled {
+            // A transport has its own error for a request that was
+            // cancelled under it; whatever it threw, the completion ended
+            // because the task was cancelled.
+            throw CancellationError()
+        }
+    }
+
+    private func read(_ chat: ORChatRequest, onEvent: @Sendable (ORStreamEvent) async -> Void) async throws -> ORCompletion {
         var request = authorized(Self.baseURL.appendingPathComponent("chat/completions"), method: "POST")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try Self.body(chat)
@@ -137,7 +148,9 @@ public struct OpenRouterClient: Sendable {
         }
         let effort = chat.reasoningEffort.flatMap { $0.isEmpty ? nil : Body.Reasoning(effort: $0) }
         let encoder = JSONEncoder()
-        encoder.outputFormatting = [.withoutEscapingSlashes]
+        // Keys in one order, so that a request is the same bytes from one
+        // process to the next (a provider's prompt cache goes by them).
+        encoder.outputFormatting = [.withoutEscapingSlashes, .sortedKeys]
         return try encoder.encode(Body(model: chat.model, messages: chat.messages, reasoning: effort, tools: tools.isEmpty ? nil : tools))
     }
 }

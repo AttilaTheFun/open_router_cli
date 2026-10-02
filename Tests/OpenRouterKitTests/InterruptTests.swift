@@ -110,6 +110,58 @@ private struct CountTool: ORTool {
     #expect(await mock.sentBodies.isEmpty)
 }
 
+/// A transport whose stream, when the task reading it is cancelled,
+/// throws what URLSession throws: its own error, not `CancellationError`.
+private struct CancelsLikeURLSession: ORTransport {
+    struct Lines: AsyncSequence, Sendable {
+        typealias Element = String
+
+        struct AsyncIterator: AsyncIteratorProtocol {
+            let started: AsyncStream<Void>.Continuation
+
+            mutating func next() async throws -> String? {
+                started.yield()
+                do { try await Task.sleep(for: .seconds(3600)) } catch { throw URLError(.cancelled) }
+                return nil
+            }
+        }
+
+        let started: AsyncStream<Void>.Continuation
+
+        func makeAsyncIterator() -> AsyncIterator { AsyncIterator(started: started) }
+    }
+
+    let started: AsyncStream<Void>.Continuation
+
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) { throw URLError(.unsupportedURL) }
+
+    func lines(for request: URLRequest) async throws -> (any AsyncSequence<String, any Error> & Sendable, HTTPURLResponse) {
+        guard let url = request.url, let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil) else {
+            throw URLError(.badURL)
+        }
+        return (Lines(started: started), response)
+    }
+}
+
+/// Whatever the transport throws when it is cancelled, a cancelled
+/// completion and a cancelled turn end as `CancellationError`.
+@Test(.timeLimit(.minutes(1))) func aCancelledRequestIsACancellationWhateverTheTransportThrows() async throws {
+    let (reading, signal) = AsyncStream.makeStream(of: Void.self)
+    let client = OpenRouterClient(apiKey: "k", transport: CancelsLikeURLSession(started: signal))
+    let asking = Task { try await client.complete(ORChatRequest(model: "m", messages: [])) { _ in } }
+    for await _ in reading { break }
+    asking.cancel()
+    await #expect(throws: CancellationError.self) { _ = try await asking.value }
+
+    let (again, second) = AsyncStream.makeStream(of: Void.self)
+    let agent = ORAgent(client: OpenRouterClient(apiKey: "k", transport: CancelsLikeURLSession(started: second)), model: "m")
+    let turn = Task { try await agent.send("go") { _ in } }
+    for await _ in again { break }
+    turn.cancel()
+    await #expect(throws: CancellationError.self) { try await turn.value }
+    #expect(await agent.history == [ORMessage(role: .user, content: "go")])
+}
+
 // MARK: Conversations with a tool call left open
 
 private let callA = ORToolCall(id: "a", function: .init(name: "bash", arguments: "{}"))
