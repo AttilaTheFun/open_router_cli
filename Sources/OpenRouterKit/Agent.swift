@@ -31,10 +31,24 @@ public enum ORAgentEvent: Sendable {
 public enum ORAgentError: LocalizedError, Equatable {
     /// `send` was called while a turn was still running.
     case turnInProgress
+    /// The model stopped before its reply was whole, for the reason the
+    /// API gave: "length" (its output limit) or "content_filter". The
+    /// text it had written is in the conversation; any tool calls, whose
+    /// arguments may be cut short, are not, and were not run.
+    case replyCutOff(reason: String)
+    /// The model finished with neither text nor a tool call.
+    case emptyReply
+    /// The turn used all its rounds of tool calls without a final answer.
+    case tooManyRounds(Int)
 
     public var errorDescription: String? {
         switch self {
         case .turnInProgress: "A turn is already running in this conversation."
+        case .replyCutOff("length"): "The reply was cut off: the model reached its output limit."
+        case .replyCutOff("content_filter"): "The reply was cut off by a content filter."
+        case .replyCutOff(let reason): "The reply was cut off (\(reason))."
+        case .emptyReply: "The model replied with nothing."
+        case .tooManyRounds(let rounds): "The turn was stopped after \(rounds) rounds of tool calls without a final answer."
         }
     }
 }
@@ -84,8 +98,13 @@ public actor ORAgent {
     /// The client the next completion goes through (a new key).
     public func setClient(_ client: OpenRouterClient) { self.client = client }
 
+    /// The finish reasons that mean the reply is not whole.
+    private static let cutOffReasons: Set<String> = ["length", "content_filter"]
+
     /// Runs a user turn to completion, reporting events as it goes, and
-    /// returns when the model has replied without calling a tool. Appends
+    /// returns when the model has replied without calling a tool: a
+    /// return is a finished answer. A reply that failed, was cut off or
+    /// was empty, and a turn that ran out of rounds, throw. Appends
     /// every message (user, assistant, tool results) to `messages` as it
     /// lands. Each event is awaited: the turn goes on when `onEvent`
     /// returns, so a consumer sees them in order and can read `history`
@@ -117,25 +136,37 @@ public actor ORAgent {
             try Task.checkCancellation()
             let request = ORChatRequest(model: model, messages: ORMessage.answeringEveryToolCall(messages), tools: tools,
                                         temperature: temperature, reasoningEffort: reasoningEffort)
-            var finished: ORMessage?
+            var finished: (reason: String?, message: ORMessage)?
             for try await event in client.stream(request) {
                 switch event {
                 case .token(let text): await onEvent(.delta(text))
                 case .usage(let prompt, let completion): await onEvent(.usage(prompt: prompt, completion: completion))
                 case .toolCall: break // gathered into the finished message
-                case .finished(_, let message): finished = message
+                case .finished(let reason, let message): finished = (reason, message)
                 }
             }
-            guard let message = finished else {
-                // A cancelled task's stream ends early, with no finished
-                // message; the text so far is not kept.
+            guard let finished else {
+                // The client's stream ends with a finished message or a
+                // throw; it ends with neither only when this task was
+                // cancelled. The text so far is not kept.
                 try Task.checkCancellation()
-                return
+                throw ORStreamError.incomplete
             }
-            messages.append(message)
-            await onEvent(.assistant(message))
-            if let text = message.content, !text.isEmpty { await onEvent(.message(text)) }
-            guard let calls = message.toolCalls, !calls.isEmpty else { return }
+            var message = finished.message
+            let cutOff = finished.reason.flatMap { Self.cutOffReasons.contains($0) ? $0 : nil }
+            // A reply cut off may have cut a tool call's arguments short:
+            // its calls are neither kept nor run.
+            if cutOff != nil { message.toolCalls = nil }
+            let text = message.content ?? ""
+            let calls = message.toolCalls ?? []
+            if !text.isEmpty || !calls.isEmpty {
+                messages.append(message)
+                await onEvent(.assistant(message))
+                if !text.isEmpty { await onEvent(.message(text)) }
+            }
+            if let cutOff { throw ORAgentError.replyCutOff(reason: cutOff) }
+            if text.isEmpty, calls.isEmpty { throw ORAgentError.emptyReply }
+            if calls.isEmpty { return }
             for call in calls {
                 await onEvent(.toolCall(name: call.function.name, arguments: call.function.arguments, id: call.id))
                 let answer = await answer(call)
@@ -143,6 +174,9 @@ public actor ORAgent {
                 await onEvent(.toolResult(name: call.function.name, output: answer.output, id: call.id, isError: answer.isError))
             }
         }
+        // Cancelled during the last round's tools: the loop's check never came.
+        try Task.checkCancellation()
+        throw ORAgentError.tooManyRounds(maxRounds)
     }
 
     /// Runs the tool a call names. Once the turn is cancelled nothing more

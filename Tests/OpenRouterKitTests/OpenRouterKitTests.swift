@@ -119,7 +119,7 @@ import TestSupport
 /// One turn at a time: a second `send` while the first is running is
 /// refused, and leaves the conversation as the first turn has it.
 @Test func aSecondTurnWhileOneRunsIsRefused() async throws {
-    let mock = MockTransport(streams: [[try sse(["choices": [["delta": ["content": "ok"], "finish_reason": "stop"]]]), "data: [DONE]"]])
+    let mock = MockTransport(streams: [try reply("ok"), try reply("fine")])
     let agent = ORAgent(client: OpenRouterClient(apiKey: "k", transport: mock), model: "m")
     try await agent.send("first") { event in
         guard case .started = event else { return }
@@ -127,5 +127,6 @@ import TestSupport
     }
     #expect(await agent.history.map(\.content) == ["first", "ok"])
     // Over, the agent takes the next.
-    await #expect(throws: Never.self) { try await agent.send("third") { _ in } }
+    try await agent.send("third") { _ in }
+    #expect(await agent.history.map(\.content) == ["first", "ok", "third", "fine"])
 }

@@ -1,7 +1,8 @@
 // Reassembles a streamed chat completion. OpenRouter sends deltas: text a
 // fragment at a time, and tool calls whose name and arguments arrive in
 // pieces, indexed. This gathers them into whole tokens and, at the end,
-// one assistant message with its text and tool calls.
+// one assistant message with its text and tool calls — or throws, when
+// the stream says it failed or ends before the completion does.
 
 import Foundation
 
@@ -11,9 +12,18 @@ struct StreamAssembler {
     private var finishReason: String?
 
     /// Feeds one SSE data object, yielding token events as text arrives.
-    /// Tool calls are held until `finish`, when they are whole.
-    mutating func ingest(_ data: Data) -> [ORStreamEvent] {
-        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
+    /// Tool calls are held until `finish`, when they are whole. Throws
+    /// when the object is not one (`malformed`) or carries an error
+    /// (`failed`): a provider that fails part-way says so in the stream,
+    /// the HTTP status having long been sent as 200.
+    mutating func ingest(_ data: Data) throws -> [ORStreamEvent] {
+        guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            throw ORStreamError.malformed(String(decoding: data.prefix(200), as: UTF8.self))
+        }
+        if let error = root["error"] as? [String: Any] {
+            let code = (error["code"] as? String) ?? (error["code"] as? Int).map(String.init)
+            throw ORStreamError.failed(code: code, message: error["message"] as? String ?? "no message")
+        }
         var events: [ORStreamEvent] = []
         if let usage = root["usage"] as? [String: Any] {
             let prompt = usage["prompt_tokens"] as? Int ?? 0
@@ -42,9 +52,13 @@ struct StreamAssembler {
         return events
     }
 
-    /// The completion is over: the assembled tool calls, then the finished
-    /// assistant message to append to the conversation.
-    mutating func finish() -> ORStreamEvent {
+    /// The stream is over: the finished assistant message, with its tool
+    /// calls assembled, and why the model stopped. Throws `incomplete`
+    /// when nothing said the completion was: no finish reason, and no
+    /// `[DONE]` (`sawDone`) — the connection ended first.
+    func finish(sawDone: Bool) throws -> ORStreamEvent {
+        guard finishReason != nil || sawDone else { throw ORStreamError.incomplete }
+        if finishReason == "error" { throw ORStreamError.failed(code: nil, message: "the provider ended the reply with an error") }
         let toolCalls = calls.keys.sorted().compactMap { calls[$0] }.filter { !$0.id.isEmpty || !$0.function.name.isEmpty }
         let message = ORMessage(role: .assistant,
                                 content: text.isEmpty ? nil : text,

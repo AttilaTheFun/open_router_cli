@@ -159,3 +159,25 @@ private func toolResult(_ line: [String: Any]) throws -> [String: Any] {
     #expect(failed.out == "")
     #expect(failed.err == "OpenRouter 500: no\n")
 }
+
+/// A reply that never finished, and one cut off at the output limit, end
+/// the turn with an error result that says so, not with a success.
+@Test(.timeLimit(.minutes(1))) func aCutOffReplyEndsTheTurnWithAnError() async throws {
+    let rig = try Rig(streams: [
+        [try sse(["choices": [["delta": ["content": "Half an ans"]]]])],
+        [try sse(["choices": [["delta": ["content": "As far as it got"]]]]),
+         try sse(["choices": [["delta": [String: Any](), "finish_reason": "length"]]]), "data: [DONE]"],
+    ])
+    #expect(await rig.runner.turn("one") == false)
+    #expect(await rig.runner.turn("two") == false)
+    let lines = try objects(try rig.written().out)
+    // The first: its deltas, and the error. The second: its text as a
+    // message too, since the model did write it, and the error.
+    #expect(lines.map { $0["type"] as? String } == ["stream_event", "stream_event", "result",
+                                                    "stream_event", "stream_event", "assistant", "result"])
+    #expect(lines[2]["is_error"] as? Bool == true)
+    #expect(lines[2]["result"] as? String == "The reply was cut off: the stream ended before the model finished.")
+    #expect(lines[6]["is_error"] as? Bool == true)
+    #expect(lines[6]["result"] as? String == "The reply was cut off: the model reached its output limit.")
+    #expect(try rig.store.load(id: rig.conversation.id).messages.map(\.content) == ["one", "two", "As far as it got"])
+}

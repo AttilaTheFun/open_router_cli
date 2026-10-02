@@ -42,7 +42,10 @@ flight: the reply being written is dropped, a running command is killed,
 the tools not yet run are not run, and the turn ends with an error result
 ("Interrupted", `error_during_execution`), as Claude Code's does; the
 session is saved with every tool call answered, so it carries on from
-there. `openrouter -p PROMPT` exits 1 when its one turn fails.
+there. A reply that fails part-way, ends before the model finished, or is
+cut off at the model's output limit also ends the turn with an error
+result, which says which. `openrouter -p PROMPT` exits 1 when its one turn
+fails.
 
 The model list (ids, names, prices per token, tool support) is kept in
 `~/.openrouter/models.json` and refreshed when older than a day, by
