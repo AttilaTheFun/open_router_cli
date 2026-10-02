@@ -26,51 +26,74 @@ public enum CodingTools {
     /// tool then opens.
     static func resolve(_ path: String, in cwd: String) throws -> String {
         let expanded = (path as NSString).expandingTildeInPath
-        let root = try canonical(URL(fileURLWithPath: cwd).path)
-        let target = try canonical(expanded.hasPrefix("/") ? expanded : (root as NSString).appendingPathComponent(expanded))
-        guard target == root || target.hasPrefix(root == "/" ? root : root + "/") else {
+        let root = try canonical(components(URL(fileURLWithPath: cwd).path))
+        let isAbsolute = expanded.utf8.first == UInt8(ascii: "/")
+        let target = try canonical(isAbsolute ? components(expanded) : root + components(expanded))
+        guard target.starts(with: root) else {
             throw ToolFailure(message: "\(path) is outside the working directory (\(cwd)); the file tools only reach inside it")
         }
-        return target
+        return "/" + target.joined(separator: "/")
     }
 
-    /// An absolute path with `.` and `..` taken out and every symbolic
-    /// link followed, whether or not anything exists at its end yet (a
-    /// file about to be written has no path to ask the system about).
-    static func canonical(_ path: String) throws -> String {
-        var pending = Array(path.split(separator: "/").map(String.init).reversed())
+    /// A path's names, split where the system splits it: at each "/"
+    /// byte. (Split as Swift characters, a "/" followed by a combining
+    /// mark is one character and no separator at all, and a name could
+    /// hide a step through a link.)
+    static func components(_ path: String) -> [String] {
+        path.utf8.split(separator: UInt8(ascii: "/")).map { String(decoding: $0, as: UTF8.self) }
+    }
+
+    /// The names of an absolute path with `.` and `..` taken out and every
+    /// symbolic link followed, whether or not anything exists at its end
+    /// yet (a file about to be written has no path to ask the system
+    /// about).
+    static func canonical(_ names: [String]) throws -> [String] {
+        var pending = Array(names.reversed())
         var resolved: [String] = []
         var links = 0
-        while let component = pending.popLast() {
-            if component == "." { continue }
-            if component == ".." { _ = resolved.popLast(); continue }
-            let here = "/" + (resolved + [component]).joined(separator: "/")
+        while let name = pending.popLast() {
+            if name == "." { continue }
+            if name == ".." { _ = resolved.popLast(); continue }
+            let here = "/" + (resolved + [name]).joined(separator: "/")
             guard let destination = try? FileManager.default.destinationOfSymbolicLink(atPath: here) else {
-                resolved.append(component)
+                resolved.append(name)
                 continue
             }
             // A link: what it points to takes its place, from the root if
             // it is absolute, and is walked in turn.
             links += 1
-            guard links <= 64 else { throw ToolFailure(message: "too many symbolic links in \(path)") }
-            if destination.hasPrefix("/") { resolved = [] }
-            pending.append(contentsOf: destination.split(separator: "/").map(String.init).reversed())
+            guard links <= 64 else { throw ToolFailure(message: "too many symbolic links in /\(names.joined(separator: "/"))") }
+            if destination.utf8.first == UInt8(ascii: "/") { resolved = [] }
+            pending.append(contentsOf: components(destination).reversed())
         }
-        return "/" + resolved.joined(separator: "/")
+        return resolved
+    }
+
+    /// A text file's contents, or a failure that says why not (missing,
+    /// not UTF-8, not permitted): the model can act on the reason.
+    static func read(_ full: String) throws -> String {
+        do {
+            return try String(contentsOfFile: full, encoding: .utf8)
+        } catch {
+            throw ToolFailure(message: "cannot read \(full): \(error.localizedDescription)")
+        }
     }
 
     static func arguments(_ json: String) -> [String: Any] {
         ((try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any]) ?? [:]
     }
 
-    /// Output the model sees is capped: a build log is not a conversation.
-    static func capped(_ text: String, limit: Int = 30_000) -> String {
-        guard text.count > limit else { return text }
-        return String(text.prefix(limit)) + "\n… (\(text.count - limit) more characters truncated)"
+    /// How much of a tool's output the model sees, in characters (bytes,
+    /// for a command's): a build log is not a conversation.
+    static let outputLimit = 30_000
+
+    static func capped(_ text: String) -> String {
+        guard text.count > outputLimit else { return text }
+        return String(text.prefix(outputLimit)) + "\n… (\(text.count - outputLimit) more characters truncated)"
     }
 }
 
-struct ToolFailure: LocalizedError {
+struct ToolFailure: LocalizedError, Equatable {
     let message: String
     var errorDescription: String? { message }
 }
@@ -83,10 +106,6 @@ public struct BashTool: ORTool {
         """
     let cwd: String
 
-    /// How many bytes of output the model sees; a build log is not a
-    /// conversation. The rest is counted and dropped as it arrives.
-    static let kept = 30_000
-
     public init(cwd: String) { self.cwd = cwd }
 
     public func call(arguments: String) async throws -> String {
@@ -94,7 +113,8 @@ public struct BashTool: ORTool {
         guard let command = args["command"] as? String, !command.isEmpty else { throw ToolFailure(message: "bash needs a command") }
         // Seconds; a model that sends milliseconds gets the cap.
         let timeout = min(600, max(1, (args["timeout"] as? Int) ?? 120))
-        let outcome = try await Shell.run(command, cwd: cwd, timeout: .seconds(timeout), keep: Self.kept)
+        // Output past the limit is counted and dropped as it arrives.
+        let outcome = try await Shell.run(command, cwd: cwd, timeout: .seconds(timeout), keep: CodingTools.outputLimit)
         var text = String(decoding: outcome.output, as: UTF8.self)
         if outcome.dropped > 0 { text += "\n… (\(outcome.dropped) more bytes truncated)" }
         switch outcome.stopped {
@@ -121,8 +141,9 @@ public struct ReadFileTool: ORTool {
         let args = CodingTools.arguments(arguments)
         guard let path = args["path"] as? String else { throw ToolFailure(message: "read_file needs a path") }
         let full = try CodingTools.resolve(path, in: cwd)
-        guard let text = try? String(contentsOfFile: full, encoding: .utf8) else { throw ToolFailure(message: "cannot read \(full)") }
-        let lines = text.components(separatedBy: "\n")
+        var lines = try CodingTools.read(full).components(separatedBy: "\n")
+        // The newline that ends the last line begins no line of its own.
+        if lines.last == "" { lines.removeLast() }
         let offset = max(1, (args["offset"] as? Int) ?? 1)
         let limit = max(1, (args["limit"] as? Int) ?? 400)
         guard offset <= lines.count else { return "(file has \(lines.count) lines)" }
@@ -172,8 +193,9 @@ public struct EditFileTool: ORTool {
         guard let path = args["path"] as? String, let old = args["old_string"] as? String, let new = args["new_string"] as? String else {
             throw ToolFailure(message: "edit_file needs path, old_string and new_string")
         }
+        guard !old.isEmpty else { throw ToolFailure(message: "old_string is empty; give the text to replace") }
         let full = try CodingTools.resolve(path, in: cwd)
-        guard let text = try? String(contentsOfFile: full, encoding: .utf8) else { throw ToolFailure(message: "cannot read \(full)") }
+        let text = try CodingTools.read(full)
         let count = text.components(separatedBy: old).count - 1
         guard count == 1 else { throw ToolFailure(message: count == 0 ? "old_string not found in \(full)" : "old_string occurs \(count) times in \(full); make it unique") }
         let edited = text.replacingOccurrences(of: old, with: new)
@@ -195,7 +217,12 @@ public struct ListDirectoryTool: ORTool {
     public func call(arguments: String) async throws -> String {
         let args = CodingTools.arguments(arguments)
         let full = try CodingTools.resolve((args["path"] as? String) ?? ".", in: cwd)
-        guard let names = try? FileManager.default.contentsOfDirectory(atPath: full) else { throw ToolFailure(message: "cannot list \(full)") }
+        let names: [String]
+        do {
+            names = try FileManager.default.contentsOfDirectory(atPath: full)
+        } catch {
+            throw ToolFailure(message: "cannot list \(full): \(error.localizedDescription)")
+        }
         var lines: [String] = []
         for name in names.sorted() {
             var isDirectory: ObjCBool = false

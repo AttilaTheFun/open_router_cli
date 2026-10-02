@@ -12,7 +12,7 @@ import Foundation
 /// How a command ended, and what it printed.
 struct ShellOutcome: Sendable {
     /// Why a command was stopped, when it did not end by itself.
-    enum Stop: Sendable, Equatable {
+    enum Stop: Sendable {
         /// It ran past its timeout.
         case deadline
         /// The task that asked for it was cancelled.
@@ -55,6 +55,8 @@ enum Shell {
     /// `timeout`, or when the calling task is cancelled, the command is
     /// stopped: the outcome says which.
     static func run(_ command: String, cwd: String, timeout: Duration, keep: Int) async throws -> ShellOutcome {
+        // A task already cancelled starts nothing.
+        try Task.checkCancellation()
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
         process.arguments = ["-lc", command]
@@ -86,8 +88,10 @@ enum Shell {
         }
         // Foundation starts a process as the leader of a process group of
         // its own; a signal to the group reaches what the shell started
-        // as well. Checked rather than assumed: a signal is only ever
-        // sent to a group the shell leads.
+        // as well. Checked rather than assumed: the group is signalled
+        // only if the shell was seen to lead it. (The usual limit of
+        // signalling by number holds: once the shell and everything it
+        // started are gone, the number is the system's to give again.)
         let pid = process.processIdentifier
         let target = Target(pid: pid, isGroup: getpgid(pid) == pid)
 

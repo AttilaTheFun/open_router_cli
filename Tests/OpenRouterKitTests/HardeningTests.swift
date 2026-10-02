@@ -42,7 +42,7 @@ private struct Folders {
 
 @Test func pathsInsideTheWorkingDirectoryResolve() throws {
     let folders = try Folders()
-    let root = try CodingTools.canonical(folders.root.path)
+    let root = "/" + (try CodingTools.canonical(CodingTools.components(folders.root.path))).joined(separator: "/")
     #expect(try CodingTools.resolve("sub/in.txt", in: folders.root.path) == root + "/sub/in.txt")
     #expect(try CodingTools.resolve(".", in: folders.root.path) == root)
     #expect(try CodingTools.resolve("sub/../sub/./in.txt", in: folders.root.path) == root + "/sub/in.txt")
@@ -81,7 +81,18 @@ func pathsThatLeadOutAreRefused(path: String) throws {
     let root = try scratch()
     try FileManager.default.createSymbolicLink(atPath: root.appendingPathComponent("a").path, withDestinationPath: "b")
     try FileManager.default.createSymbolicLink(atPath: root.appendingPathComponent("b").path, withDestinationPath: "a")
-    #expect(throws: ToolFailure.self) { try CodingTools.resolve("a/file", in: root.path) }
+    let failure = #expect(throws: ToolFailure.self) { try CodingTools.resolve("a/file", in: root.path) }
+    #expect(failure?.message.hasPrefix("too many symbolic links in /") == true)
+    #expect(failure?.message.hasSuffix("/a/file") == true)
+}
+
+/// The refusal says what was refused and where the tools do reach, for
+/// the model to act on.
+@Test func aRefusalSaysWhy() throws {
+    let folders = try Folders()
+    #expect(throws: ToolFailure(message: "../outside/secret.txt is outside the working directory (\(folders.root.path)); the file tools only reach inside it")) {
+        try CodingTools.resolve("../outside/secret.txt", in: folders.root.path)
+    }
 }
 
 @Test func theFileToolsDoNotReachOutside() async throws {
@@ -137,6 +148,55 @@ func pathsThatLeadOutAreRefused(path: String) throws {
     #expect(try await lines([:]) == "1\tone\n2\ttwo\n3\tthree\n")
 }
 
+@Test func readFileCountsAFilesLinesAsAnEditorDoes() async throws {
+    let root = try scratch()
+    try "one\ntwo\n".write(to: root.appendingPathComponent("ended.txt"), atomically: true, encoding: .utf8)
+    try "".write(to: root.appendingPathComponent("empty.txt"), atomically: true, encoding: .utf8)
+    try "\n\n".write(to: root.appendingPathComponent("blank.txt"), atomically: true, encoding: .utf8)
+    let read = ReadFileTool(cwd: root.path)
+    // A file that ends with a newline has two lines, not a third, empty one.
+    #expect(try await read.call(arguments: try json(["path": "ended.txt"])) == "1\tone\n2\ttwo\n")
+    #expect(try await read.call(arguments: try json(["path": "ended.txt", "offset": 3])) == "(file has 2 lines)")
+    #expect(try await read.call(arguments: try json(["path": "empty.txt"])) == "(file has 0 lines)")
+    // Blank lines are lines.
+    #expect(try await read.call(arguments: try json(["path": "blank.txt"])) == "1\t\n2\t\n")
+}
+
+/// A file that cannot be read says why, which is what the model can act on.
+@Test func aFileThatCannotBeReadSaysWhy() async throws {
+    let root = try scratch()
+    try Data([0xFF, 0xFE, 0x00, 0xD8]).write(to: root.appendingPathComponent("binary.dat"))
+    let read = ReadFileTool(cwd: root.path)
+    let missing = await #expect(throws: ToolFailure.self) { _ = try await read.call(arguments: try json(["path": "nowhere.txt"])) }
+    let binary = await #expect(throws: ToolFailure.self) { _ = try await read.call(arguments: try json(["path": "binary.dat"])) }
+    #expect(missing?.message.hasPrefix("cannot read ") == true)
+    #expect(binary?.message.hasPrefix("cannot read ") == true)
+    // Two different reasons, each after the path.
+    #expect(missing?.message.contains("nowhere.txt: ") == true)
+    #expect(binary?.message.contains("binary.dat: ") == true)
+    #expect(missing?.message.split(separator: ": ").last != binary?.message.split(separator: ": ").last)
+    await #expect(throws: ToolFailure(message: "read_file needs a path")) { _ = try await read.call(arguments: "{}") }
+    let listing = await #expect(throws: ToolFailure.self) { _ = try await ListDirectoryTool(cwd: root.path).call(arguments: try json(["path": "nowhere"])) }
+    #expect(listing?.message.contains("nowhere: ") == true)
+}
+
+@Test func editFileReplacesExactlyOneOccurrence() async throws {
+    let root = try scratch()
+    let file = root.appendingPathComponent("a.txt")
+    try "one two one".write(to: file, atomically: true, encoding: .utf8)
+    let edit = EditFileTool(cwd: root.path)
+    let full = try CodingTools.resolve("a.txt", in: root.path)
+    func arguments(_ old: String, _ new: String) throws -> String { try json(["path": "a.txt", "old_string": old, "new_string": new]) }
+    await #expect(throws: ToolFailure(message: "old_string occurs 2 times in \(full); make it unique")) { _ = try await edit.call(arguments: try arguments("one", "1")) }
+    await #expect(throws: ToolFailure(message: "old_string not found in \(full)")) { _ = try await edit.call(arguments: try arguments("three", "3")) }
+    await #expect(throws: ToolFailure(message: "old_string is empty; give the text to replace")) { _ = try await edit.call(arguments: try arguments("", "x")) }
+    await #expect(throws: ToolFailure(message: "edit_file needs path, old_string and new_string")) { _ = try await edit.call(arguments: try json(["path": "a.txt"])) }
+    // None of those changed the file.
+    #expect(try String(contentsOf: file, encoding: .utf8) == "one two one")
+    #expect(try await edit.call(arguments: try arguments("two", "2")) == "edited \(full)")
+    #expect(try String(contentsOf: file, encoding: .utf8) == "one 2 one")
+}
+
 // MARK: Session ids
 
 @Test(arguments: ["", ".", "..", "../escape", "a/b", "/etc/passwd", ".hidden", "-flag", "has space", "tab\t", "new\nline", "naïve", "~", "a\\b",
@@ -180,4 +240,17 @@ func anIdThatIsAFileNameIsTaken(id: String) throws {
     try Data("{}".utf8).write(to: store.directory.appendingPathComponent(".hidden.json"))
     try Data("not json".utf8).write(to: store.directory.appendingPathComponent("broken.json"))
     #expect(store.list().map(\.id) == ["real"])
+}
+
+/// A "/" with a combining mark after it is one character to Swift and
+/// still a separator to the system: paths are split as the system splits
+/// them, so a link out followed by such a name is still a way out.
+@Test func aSeparatorWithACombiningMarkIsStillASeparator() async throws {
+    let folders = try Folders()
+    let before = try folders.outsideNames()
+    #expect(throws: ToolFailure.self) { try CodingTools.resolve("out/\u{301}x", in: folders.root.path) }
+    await #expect(throws: ToolFailure.self) {
+        _ = try await WriteFileTool(cwd: folders.root.path).call(arguments: try json(["path": "out/\u{301}x", "content": "escaped"]))
+    }
+    #expect(try folders.outsideNames() == before)
 }
