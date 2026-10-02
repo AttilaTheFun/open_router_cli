@@ -76,6 +76,11 @@ private let visorManual = ["-p", "--input-format", "stream-json", "--output-form
     #expect(throws: Options.BadOption(message: "--model needs a value")) { try Options(["-p", "--model"]) }
     #expect(throws: Options.BadOption(message: "--resume needs a value")) { try Options(["--resume"]) }
     #expect(throws: Options.BadOption(message: "-m needs a value")) { try Options(["-p", "-m"]) }
+    // The efforts there are, in any case; anything else is not dropped in silence.
+    for effort in ["low", "medium", "high", "xhigh", "max", "HIGH"] { #expect(try Options(["--effort", effort]).values["effort"] == effort) }
+    #expect(throws: Options.BadOption(message: "--effort is low, medium or high (xhigh and max read as high), not \"minimal\"")) {
+        try Options(["-p", "--effort", "minimal"])
+    }
     // The two formats there are; Claude Code's `json` is not one of them.
     #expect(try Options(["--output-format", "text", "--input-format=stream-json"]).values == ["output-format": "text", "input-format": "stream-json"])
     #expect(throws: Options.BadOption(message: "--output-format is text or stream-json, not \"json\"")) { try Options(["-p", "--output-format", "json"]) }

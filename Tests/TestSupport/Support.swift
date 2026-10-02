@@ -18,6 +18,7 @@ public actor MockTransport: ORTransport {
     /// Answers to plain requests by path (and query, when there is one),
     /// for the ones that are not `status` and `dataBody`.
     private let answers: [String: (status: Int, body: String)]
+    private let failure: URLError?
     /// The paths (and queries) of the plain requests, in order.
     public private(set) var requested: [String] = []
     /// SSE line batches, one per completion the agent asks for, in order.
@@ -28,14 +29,19 @@ public actor MockTransport: ORTransport {
     /// The Authorization header of the last plain request, if it had one.
     public private(set) var lastAuthorization: String?
 
-    public init(streams: [[String]] = [], status: Int = 200, dataBody: Data = Data(), answers: [String: (status: Int, body: String)] = [:]) {
+    /// - Parameter failure: what every request throws, in place of an
+    ///   answer: a network that is not there.
+    public init(streams: [[String]] = [], status: Int = 200, dataBody: Data = Data(), answers: [String: (status: Int, body: String)] = [:],
+                failure: URLError? = nil) {
         self.streams = streams
         self.status = status
         self.dataBody = dataBody
         self.answers = answers
+        self.failure = failure
     }
 
     public func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        if let failure { throw failure }
         lastAuthorization = request.value(forHTTPHeaderField: "Authorization")
         let asked = (request.url?.path ?? "") + (request.url?.query.map { "?" + $0 } ?? "")
         requested.append(asked)
@@ -44,6 +50,7 @@ public actor MockTransport: ORTransport {
     }
 
     public func lines(for request: URLRequest) async throws -> (any AsyncSequence<String, any Error> & Sendable, HTTPURLResponse) {
+        if let failure { throw failure }
         if let body = request.httpBody { sentBodies.append(body) }
         let batch = index < streams.count ? streams[index] : []
         index += 1

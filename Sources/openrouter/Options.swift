@@ -38,6 +38,10 @@ struct Options {
     /// `json` output, one object at the end, is not among them.)
     static let formats: Set<String> = ["text", "stream-json"]
 
+    /// What `--effort` may be: OpenRouter's three, and Claude Code's two
+    /// above them, which read as high. In any case.
+    static let efforts: Set<String> = ["low", "medium", "high", "xhigh", "max"]
+
     /// Throws `BadOption` for an option this CLI does not take, one that
     /// needs a value and has none, a switch given one, and a value an
     /// option cannot take.
@@ -84,6 +88,9 @@ struct Options {
         if let text = values["max-turns"] {
             guard let turns = Int(text), turns > 0 else { throw BadOption(message: "--max-turns takes a number above zero, not \"\(text)\"") }
             maxTurns = turns
+        }
+        if let effort = values["effort"], !Self.efforts.contains(effort.lowercased()) {
+            throw BadOption(message: "--effort is low, medium or high (xhigh and max read as high), not \"\(effort)\"")
         }
         for option in ["input-format", "output-format"] {
             if let format = values[option], !Self.formats.contains(format) {

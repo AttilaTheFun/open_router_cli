@@ -46,7 +46,8 @@ the same command line. What each does here:
 
 | Option | Here |
 | --- | --- |
-| `-p`, `--model`, `--effort`, `--resume` | As in Claude Code. |
+| `-p`, `--model`, `--resume` | As in Claude Code. |
+| `--effort` | `low`, `medium` or `high`, as OpenRouter takes them; Claude Code's `xhigh` and `max` read as `high`. |
 | `--input-format`, `--output-format` | `text` or `stream-json`, as in Claude Code. |
 | `--session-id ID` | The id a new session gets. Refused when a session has that id already (that is `--resume`). |
 | `--include-partial-messages` | As in Claude Code: with stream-json output, the reply's text as it is written (`stream_event` lines). Without it only whole messages are printed. |

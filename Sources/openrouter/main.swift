@@ -227,18 +227,25 @@ func chat(resume: String?) async -> Int32 {
     while true {
         output.text("\n\u{203A} ")
         guard let entered = readLine() else { output.text("\n"); break }
-        let text = entered.trimmingCharacters(in: .whitespaces)
-        guard !text.isEmpty else { continue }
-        if text.hasPrefix("/model ") {
-            do {
-                try await conversation.setModel(String(text.dropFirst(7)).trimmingCharacters(in: .whitespaces))
-            } catch {
-                output.error(error.localizedDescription)
+        let text: String
+        switch ChatInput(entered) {
+        case .nothing:
+            continue
+        case .quit:
+            return 0
+        case .model(let id):
+            if let id {
+                do {
+                    try await conversation.setModel(id)
+                } catch {
+                    output.error(error.localizedDescription)
+                }
             }
             output.line("model: \(await conversation.model)")
             continue
+        case .prompt(let prompt):
+            text = prompt
         }
-        if text == "/quit" || text == "/exit" { break }
         do {
             try await conversation.run(text) { event in
                 switch event {
