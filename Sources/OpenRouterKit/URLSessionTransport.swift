@@ -1,9 +1,6 @@
 // The real transport: URLSession, with the streamed body read as lines.
 
 import Foundation
-#if canImport(FoundationNetworking)
-import FoundationNetworking
-#endif
 
 public struct URLSessionTransport: ORTransport {
     private let session: URLSession

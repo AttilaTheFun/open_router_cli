@@ -1,7 +1,7 @@
 // The agentic loop over the client: a conversation that streams the
 // assistant's reply, runs any tools it asks for, and goes round again
-// until the model stops calling tools. Consumers inject the tools, so
-// the Playground and Visor share this and bring their own.
+// until the model stops calling tools. Consumers inject the tools: the
+// CLI brings the coding tools, a host that embeds the library its own.
 
 import Foundation
 
