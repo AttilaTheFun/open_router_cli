@@ -11,6 +11,12 @@
 //   {"type":"user","uuid":…,"message":{"content":[{"type":"tool_result","tool_use_id":…,"content":…}]}}
 //   {"type":"result","subtype":"success","is_error":false,"result":…}
 //   {"type":"result","subtype":"error_during_execution","is_error":true,"result":…}   (a failed or interrupted turn)
+// An assistant message has one id: `message_start` and `assistant` carry
+// it, and so does the message's line in the session log. A tool call has
+// one id: the `tool_use` block's, which its `tool_result` names in
+// `tool_use_id`, and which the log has as `tool_calls[].id` and
+// `tool_call_id`. The `uuid` of a `user` line is made for that line alone.
+//
 // In (stdin):
 //   {"type":"user","message":{"role":"user","content":[{"type":"text","text":…}]}}   (or "content":"…")
 //   {"type":"control_request","request_id":…,"request":{"subtype":"interrupt"}}

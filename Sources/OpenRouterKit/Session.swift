@@ -5,7 +5,10 @@
 // the model, and when. Beside it, <id>.jsonl: the same messages as a log
 // that is only ever appended to — a line per message, each with an id of
 // its own, written as the message lands — which a host can follow as the
-// conversation happens, as it follows Claude Code's and Codex's logs.
+// conversation happens, as it follows Claude Code's and Codex's logs. An
+// assistant message's line has the id the agent gave the message (the id
+// its stream-json lines carry), so a host that watched it stream finds it
+// in the log under the same id; other lines have ids made for the log.
 
 import Foundation
 
@@ -112,7 +115,10 @@ public struct ORSessionStore: Sendable {
 
     /// Adds messages to the end of the log: each a line of its own,
     /// `{"id", "timestamp", "message"}`.
-    public func appendLog(id: String, _ messages: [ORMessage]) throws {
+    /// - Parameter ids: the id of a message's line, by its place in
+    ///   `messages`, for the messages that have one already (an assistant
+    ///   message's, from the agent); the rest get new ones.
+    public func appendLog(id: String, _ messages: [ORMessage], ids: [Int: String] = [:]) throws {
         guard !messages.isEmpty else { return }
         let url = try logURL(for: id)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -120,8 +126,8 @@ public struct ORSessionStore: Sendable {
         encoder.outputFormatting = [.sortedKeys]
         let stamp = ISO8601DateFormatter().string(from: Date())
         var data = Data()
-        for message in messages {
-            let line = ORLogLine(id: UUID().uuidString.lowercased(), timestamp: stamp, message: message)
+        for (place, message) in messages.enumerated() {
+            let line = ORLogLine(id: ids[place] ?? UUID().uuidString.lowercased(), timestamp: stamp, message: message)
             data.append(try encoder.encode(line))
             data.append(0x0A)
         }

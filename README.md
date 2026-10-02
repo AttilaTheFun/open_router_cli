@@ -52,7 +52,12 @@ The model list (ids, names, prices per token, tool support) is kept in
 `openrouter models` or any headless run; Visor's model picker reads it.
 
 Sessions are kept in `~/.openrouter/sessions/<id>.json` — the messages,
-the folder, the model — and resumed by id (letters, digits, `-`, `_`
+the folder, the model — with a log beside each, `<id>.jsonl`: a line per
+message (`{"id", "timestamp", "message"}`), appended as the message
+lands, for a host to follow. An assistant message has one id, in the
+stream-json lines (`message_start`, `assistant`) and on its log line; a
+tool call has one id, on its `tool_use` block, its `tool_result`, and in
+the log's `tool_calls` and `tool_call_id`. Sessions are resumed by id (letters, digits, `-`, `_`
 and `.`; anything else is refused). Tools run without asking. The file
 tools reach only inside the session's folder, but bash runs whatever the
 model writes, as you: keep the agent in a folder you are happy for it to

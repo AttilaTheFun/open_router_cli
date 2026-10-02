@@ -235,7 +235,7 @@ func chat(resume: String?) async -> Int32 {
         do {
             try await conversation.run(text) { event in
                 switch event {
-                case .delta(let piece): output.text(piece)
+                case .delta(let piece, _): output.text(piece)
                 case .toolCall(let name, let arguments, _):
                     let object = (try? JSONSerialization.jsonObject(with: Data(arguments.utf8))) as? [String: Any]
                     let summary = (object?["command"] ?? object?["path"]) as? String ?? ""
