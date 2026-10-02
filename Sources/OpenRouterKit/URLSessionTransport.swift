@@ -3,8 +3,9 @@
 import Foundation
 
 public struct URLSessionTransport: ORTransport {
-    private let session: URLSession
-    public init(session: URLSession = .shared) { self.session = session }
+    private let session = URLSession.shared
+
+    public init() {}
 
     public func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         let (data, response) = try await session.data(for: request)

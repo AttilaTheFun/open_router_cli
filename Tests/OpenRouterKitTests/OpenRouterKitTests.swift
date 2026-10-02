@@ -44,13 +44,13 @@ import TestSupport
         switch event {
         case .toolCall(let name, let args, let id): calls.append("\(id) \(name):\(args)")
         case .toolResult(let name, let output, let id, let isError): results.append("\(id) \(name):\(output) \(isError)")
-        case .message(let text): texts.append(text)
+        case .assistant(let message, _): texts.append(message.content ?? "(no text)")
         default: break
         }
     }
     #expect(calls == ["call_1 echo:{\"text\":\"hi\"}"])
     #expect(results == ["call_1 echo:hi false"])
-    #expect(texts == ["done"])
+    #expect(texts == ["(no text)", "done"])
     // The conversation carries the user's message, the assistant's tool
     // call, the tool's result, and the reply.
     let call = ORToolCall(id: "call_1", function: .init(name: "echo", arguments: "{\"text\":\"hi\"}"))
@@ -123,4 +123,40 @@ import TestSupport
     // Over, the agent takes the next.
     try await agent.send("third") { _ in }
     #expect(await agent.history.map(\.content) == ["first", "ok", "third", "fine"])
+}
+
+/// A tool that throws.
+private struct FailingTool: ORTool {
+    struct Failure: LocalizedError {
+        var errorDescription: String? { "the disk is full" }
+    }
+
+    let name = "fail"
+    let toolDescription = "Fail."
+    let parametersJSON = "{\"type\":\"object\"}"
+    func call(arguments: String) async throws -> String { throw Failure() }
+}
+
+/// A tool that throws, and a call to a tool there is none of, are each
+/// answered with the error, for the model to read, and the turn goes on.
+@Test func aFailedToolCallIsAnsweredWithItsError() async throws {
+    let mock = MockTransport(streams: [
+        try toolCalls([("call_1", "fail", [:]), ("call_2", "nonesuch", [:]), ("call_3", "echo", ["text": "fine"])]),
+        try reply("I see"),
+    ])
+    let agent = ORAgent(client: OpenRouterClient(apiKey: "k", transport: mock), model: "m", tools: [FailingTool(), EchoTool()])
+    let recorder = Recorder<ORAgentEvent>()
+    try await agent.send("go") { await recorder.add($0) }
+    let results: [String] = await recorder.events.compactMap {
+        if case .toolResult(let name, let output, let id, let isError) = $0 { "\(id) \(name) \(isError) \(output)" } else { nil }
+    }
+    #expect(results == [
+        "call_1 fail true Error: the disk is full",
+        "call_2 nonesuch true Error: no tool named nonesuch",
+        "call_3 echo false fine",
+    ])
+    // The model was told all three, in order, and answered.
+    let sent = try #require(try await mock.sentMessages().last)
+    #expect(sent.suffix(3).map { $0["content"] } == ["Error: the disk is full", "Error: no tool named nonesuch", "fine"])
+    #expect(await agent.history.last == ORMessage(role: .assistant, content: "I see"))
 }

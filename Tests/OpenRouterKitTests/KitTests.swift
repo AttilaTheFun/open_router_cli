@@ -19,17 +19,16 @@ import TestSupport
     #expect(store.list().map(\.id) == [newer.id, older.id])
     #expect(store.list(cwd: "/tmp/a").map(\.id) == [older.id])
     #expect(try store.exists(id: newer.id))
-    try store.remove(id: newer.id)
-    #expect(try !store.exists(id: newer.id))
+    #expect(try !store.exists(id: ORSession.newID()))
 }
 
 @Test func theLogIsOnlyAppendedTo() throws {
     let store = ORSessionStore(directory: try scratch().appendingPathComponent("sessions"))
     let id = ORSession.newID()
     #expect(store.loggedCount(id: id) == 0)
-    try store.appendLog(id: id, [ORMessage(role: .user, content: "Add a README")])
+    try store.appendLog(id: id, [ORMessage(role: .user, content: "Add a README")], ids: [:])
     let call = ORToolCall(id: "c1", type: "function", function: .init(name: "bash", arguments: "{\"command\":\"ls\"}"))
-    try store.appendLog(id: id, [ORMessage(role: .assistant, toolCalls: [call]), ORMessage(role: .tool, content: "README.md", toolCallID: "c1")])
+    try store.appendLog(id: id, [ORMessage(role: .assistant, toolCalls: [call]), ORMessage(role: .tool, content: "README.md", toolCallID: "c1")], ids: [:])
     #expect(store.loggedCount(id: id) == 3)
     // A line per message, in order, each with an id of its own.
     let lines = try String(contentsOf: store.logURL(for: id), encoding: .utf8).split(separator: "\n")
@@ -74,6 +73,52 @@ import TestSupport
     let decoded = try text.split(separator: "\n").map { try JSONDecoder().decode(ORLogLine.self, from: Data($0.utf8)) }
     #expect(decoded.map(\.id) == ["3b1f0c7e-58a1-4d0e-9d0a-2f4f6f1f8a01", "9c2e7a55-0d6b-4b53-8a3e-7a1d5c0e4b02", "msg_or_new"])
     #expect(decoded.map(\.message.content) == ["hi", "hello", "again"])
+}
+
+/// The whole body of a request, as the API takes it: nothing more, and
+/// what is not asked for is left out, not sent as null.
+@Test func theRequestBodyIsWhatTheAPITakes() throws {
+    let call = ORToolCall(id: "call_1", function: .init(name: "echo", arguments: "{\"text\":\"hi\"}"))
+    let request = ORChatRequest(model: "openai/gpt-5-nano", messages: [
+        ORMessage(role: .system, content: "sys"),
+        ORMessage(role: .user, content: "go"),
+        ORMessage(role: .assistant, toolCalls: [call]),
+        ORMessage(role: .tool, content: "hi", toolCallID: "call_1", name: "echo"),
+    ], tools: [EchoTool()], reasoningEffort: "low")
+    let body = try JSONSerialization.jsonObject(with: try OpenRouterClient.body(request)) as? NSDictionary
+    let expected: NSDictionary = [
+        "model": "openai/gpt-5-nano",
+        "stream": true,
+        "reasoning": ["effort": "low"],
+        "messages": [
+            ["role": "system", "content": "sys"],
+            ["role": "user", "content": "go"],
+            ["role": "assistant", "tool_calls": [["id": "call_1", "type": "function", "function": ["name": "echo", "arguments": "{\"text\":\"hi\"}"]]]],
+            ["role": "tool", "content": "hi", "tool_call_id": "call_1", "name": "echo"],
+        ],
+        "tools": [["type": "function", "function": [
+            "name": "echo", "description": "Echo the text back.",
+            "parameters": ["type": "object", "properties": ["text": ["type": "string"]], "required": ["text"]],
+        ]]],
+    ]
+    #expect(body == expected)
+    // With no tools and no effort, neither key is there.
+    let plain = try JSONSerialization.jsonObject(with: try OpenRouterClient.body(ORChatRequest(model: "m", messages: []))) as? NSDictionary
+    #expect(plain == ["model": "m", "stream": true, "messages": [Any]()])
+}
+
+/// A tool's schema reaches the API as it was written, whatever JSON it holds.
+@Test func aToolsSchemaIsSentAsWritten() throws {
+    struct Tool: ORTool {
+        let name = "t"
+        let toolDescription = "d"
+        let parametersJSON = #"{"type":"object","properties":{"n":{"type":"integer","minimum":1,"maximum":2.5,"default":null,"enum":[1,2]},"on":{"type":"boolean","default":true}},"additionalProperties":false}"#
+        func call(arguments: String) async throws -> String { "" }
+    }
+    let body = try #require(try JSONSerialization.jsonObject(with: try OpenRouterClient.body(ORChatRequest(model: "m", messages: [], tools: [Tool()]))) as? [String: Any])
+    let function = try #require(((body["tools"] as? [[String: Any]])?.first?["function"]) as? [String: Any])
+    let written = try JSONSerialization.jsonObject(with: Data(Tool().parametersJSON.utf8)) as? NSDictionary
+    #expect(function["parameters"] as? NSDictionary == written)
 }
 
 @Test func requestCarriesReasoningEffort() throws {
@@ -148,13 +193,29 @@ import TestSupport
     #expect(content[1]["id"] as? String == "call_1")
     #expect((content[1]["input"] as? [String: String])?["command"] == "ls")
 
-    let result = StreamJSON.toolResult(callID: "call_1", output: "a\nb")
+    let result = StreamJSON.toolResult(callID: "call_1", output: "a\nb", isError: false)
     let resultRoot = try #require(try JSONSerialization.jsonObject(with: Data(result.utf8)) as? [String: Any])
     #expect(resultRoot["type"] as? String == "user")
     #expect(resultRoot["uuid"] is String)
     let block = try #require(((resultRoot["message"] as? [String: Any])?["content"] as? [[String: Any]])?.first)
     #expect(block["tool_use_id"] as? String == "call_1")
     #expect(block["content"] as? String == "a\nb")
+
+    // A failed tool's result says so.
+    let failed = StreamJSON.toolResult(callID: "call_2", output: "Error: no", isError: true)
+    let failedRoot = try #require(try JSONSerialization.jsonObject(with: Data(failed.utf8)) as? [String: Any])
+    let failedBlock = try #require(((failedRoot["message"] as? [String: Any])?["content"] as? [[String: Any]])?.first)
+    #expect(failedBlock["is_error"] as? Bool == true)
+    #expect(block["is_error"] == nil)
+
+    // Arguments that are not a JSON object are still shown: as the text they were.
+    let odd = ORMessage(role: .assistant, toolCalls: [ORToolCall(id: "call_3", function: .init(name: "bash", arguments: "{\"command\": \"ls"))])
+    let oddRoot = try #require(try JSONSerialization.jsonObject(with: Data(StreamJSON.assistant(id: "msg_2", model: "m", message: odd, usage: nil).utf8)) as? [String: Any])
+    let oddBody = try #require(oddRoot["message"] as? [String: Any])
+    #expect(oddBody["usage"] == nil)
+    let oddContent = try #require(oddBody["content"] as? [[String: Any]])
+    #expect(oddContent.count == 1)
+    #expect(oddContent[0]["input"] as? [String: String] == ["input": "{\"command\": \"ls"])
 
     let done = StreamJSON.result(.success, text: "ok", sessionID: "s")
     let doneRoot = try #require(try JSONSerialization.jsonObject(with: Data(done.utf8)) as? [String: Any])
@@ -181,7 +242,7 @@ import TestSupport
         case .assistant(let message, _): "assistant:\(message.content ?? "")/\(message.toolCalls?.count ?? 0)"
         case .toolCall(let name, _, _): "call:" + name
         case .toolResult(let name, _, _, _): "result:" + name
-        case .delta, .message, .usage: nil
+        case .delta, .usage: nil
         }
     }
     #expect(order == ["started", "assistant:Looking. /1", "call:echo", "result:echo", "assistant:done/0"])
@@ -215,7 +276,7 @@ import TestSupport
         case .assistant(_, let id):
             ids[ids.count - 1].append(id)
             ids.append([])
-        case .started, .toolCall, .toolResult, .message, .usage: break
+        case .started, .toolCall, .toolResult, .usage: break
         }
     }
     ids.removeLast()

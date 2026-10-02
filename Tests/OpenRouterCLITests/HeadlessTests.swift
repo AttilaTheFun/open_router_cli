@@ -131,7 +131,9 @@ private func toolResult(_ line: [String: Any]) throws -> [String: Any] {
     #expect(lines.count == 1)
     #expect(lines[0]["type"] as? String == "result")
     #expect(lines[0]["is_error"] as? Bool == true)
+    #expect(lines[0]["subtype"] as? String == "error_during_execution")
     #expect(lines[0]["result"] as? String == "OpenRouter 502: upstream is down")
+    #expect(lines[0]["session_id"] as? String == rig.conversation.id)
     // The user's message is kept: the conversation can be carried on.
     #expect(try rig.store.load(id: rig.conversation.id).messages == [ORMessage(role: .user, content: "hi")])
 }
@@ -278,7 +280,7 @@ private func conversation(resume: String? = nil, sessionID: String? = nil, cwd: 
     #expect(await rig.runner.turn("first"))
     let id = rig.conversation.id
     try rig.store.appendLog(id: id, [ORMessage(role: .user, content: "lost"), ORMessage(role: .assistant, content: "lost too"),
-                                     ORMessage(role: .user, content: "and this")])
+                                     ORMessage(role: .user, content: "and this")], ids: [:])
     #expect(rig.store.loggedCount(id: id) == 5)
     let resumed = try conversation(resume: id, store: rig.store, streams: [try reply("two")])
     try await resumed.run("second") { _ in }
@@ -460,4 +462,37 @@ private func logLines(_ rig: Rig) throws -> [ORLogLine] {
     // Only the message with words reached the model or the session.
     #expect(await rig.mock.sentBodies.count == 1)
     #expect(try rig.store.load(id: rig.conversation.id).messages.map(\.content) == ["words", "fine"])
+}
+
+/// The tokens a completion reports go on its assistant line, and on that
+/// one only; a failed tool's result line says it failed.
+@Test(.timeLimit(.minutes(1))) func usageAndToolFailuresReachTheLines() async throws {
+    var first = try toolCalls([("call_1", "read_file", ["path": "nowhere.txt"])])
+    first.insert(try sse(["choices": [[String: Any]](), "usage": ["prompt_tokens": 120, "completion_tokens": 8]]), at: first.count - 1)
+    let rig = try Rig(streams: [first, try reply("It is not there.")])
+    #expect(await rig.runner.turn("read it"))
+    let lines = try objects(try rig.written().out)
+    #expect(lines.map { $0["type"] as? String } == ["stream_event", "assistant", "user", "stream_event", "stream_event", "assistant", "result"])
+    let asked = try #require(lines[1]["message"] as? [String: Any])
+    #expect(asked["usage"] as? [String: Int] == ["input_tokens": 120, "output_tokens": 8])
+    #expect(asked["model"] as? String == "m")
+    let answered = try #require(lines[5]["message"] as? [String: Any])
+    #expect(answered["usage"] == nil)
+    let result = try toolResult(lines[2])
+    #expect(result["tool_use_id"] as? String == "call_1")
+    #expect(result["is_error"] as? Bool == true)
+    #expect((result["content"] as? String)?.hasPrefix("Error: cannot read ") == true)
+}
+
+@Test func effortsAreTheOnesOpenRouterTakes() {
+    #expect(Conversation.effort("low") == "low")
+    #expect(Conversation.effort("Medium") == "medium")
+    #expect(Conversation.effort("HIGH") == "high")
+    // Claude Code's levels above high read as high.
+    #expect(Conversation.effort("xhigh") == "high")
+    #expect(Conversation.effort("max") == "high")
+    // Anything else is no effort at all: the model's default.
+    #expect(Conversation.effort("minimal") == nil)
+    #expect(Conversation.effort("") == nil)
+    #expect(Conversation.effort(nil) == nil)
 }

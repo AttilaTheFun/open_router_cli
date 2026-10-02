@@ -61,7 +61,7 @@ public enum StreamJSON {
         return line(["type": "assistant", "message": body])
     }
 
-    public static func toolResult(callID: String, output: String, isError: Bool = false) -> String {
+    public static func toolResult(callID: String, output: String, isError: Bool) -> String {
         var block: [String: Any] = ["type": "tool_result", "tool_use_id": callID, "content": output]
         if isError { block["is_error"] = true }
         return line(["type": "user", "uuid": UUID().uuidString.lowercased(), "message": ["role": "user", "content": [block]]])
@@ -92,6 +92,9 @@ public enum StreamJSON {
         line(["type": "control_response", "response": ["request_id": requestID, "subtype": "error", "error": error]])
     }
 
+    /// One line of output. What is given here is strings, numbers, and
+    /// arrays and dictionaries of them (a tool call's input having come
+    /// out of the same serialiser), which always serialises.
     static func line(_ object: [String: Any]) -> String {
         guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else { return "{}" }
         return String(decoding: data, as: UTF8.self)

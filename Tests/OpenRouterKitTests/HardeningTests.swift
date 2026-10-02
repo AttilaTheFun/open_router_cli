@@ -209,8 +209,7 @@ func anIdThatIsNotAFileNameIsRefused(id: String) throws {
     #expect(throws: ORSessionError.invalidID(id)) { try store.logURL(for: id) }
     #expect(throws: ORSessionError.invalidID(id)) { try store.load(id: id) }
     #expect(throws: ORSessionError.invalidID(id)) { try store.save(ORSession(id: id, cwd: "/tmp", model: "m")) }
-    #expect(throws: ORSessionError.invalidID(id)) { try store.appendLog(id: id, [ORMessage(role: .user, content: "hi")]) }
-    #expect(throws: ORSessionError.invalidID(id)) { try store.remove(id: id) }
+    #expect(throws: ORSessionError.invalidID(id)) { try store.appendLog(id: id, [ORMessage(role: .user, content: "hi")], ids: [:]) }
     #expect(throws: ORSessionError.invalidID(id)) { try store.exists(id: id) }
     #expect(store.loggedCount(id: id) == 0)
     // Nothing was written, there or anywhere beside it.
@@ -222,7 +221,7 @@ func anIdThatIsAFileNameIsTaken(id: String) throws {
     let store = ORSessionStore(directory: try scratch().appendingPathComponent("sessions"))
     #expect(ORSessionStore.isValid(id: id))
     try store.save(ORSession(id: id, cwd: "/tmp", model: "m"))
-    try store.appendLog(id: id, [ORMessage(role: .user, content: "hi")])
+    try store.appendLog(id: id, [ORMessage(role: .user, content: "hi")], ids: [:])
     #expect(try store.url(for: id).deletingLastPathComponent().path == store.directory.path)
     #expect(try store.load(id: id).id == id)
     #expect(store.loggedCount(id: id) == 1)

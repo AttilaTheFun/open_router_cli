@@ -136,7 +136,7 @@ actor Conversation {
                 switch event {
                 case .assistant(_, let id): await self.save(naming: id)
                 case .started, .toolResult: await self.save()
-                case .delta, .toolCall, .message, .usage: break
+                case .delta, .toolCall, .usage: break
                 }
             }
             turn = .success(())
@@ -254,7 +254,7 @@ actor StreamJSONTurn {
             usage = nil
         case .toolResult(_, let result, let id, let isError):
             output.line(StreamJSON.toolResult(callID: id, output: result, isError: isError))
-        case .started, .message, .toolCall:
+        case .started, .toolCall:
             break
         }
     }
@@ -285,8 +285,8 @@ actor HeadlessRunner {
 
     /// Takes one line of stream-json input: a user message is queued, a
     /// control request is carried out or refused, and answered either
-    /// way. A line that is neither is passed over, as Claude Code passes
-    /// over lines it has no use for.
+    /// way. A line that is neither (not JSON, or of a type openrouter has
+    /// no use for) is passed over.
     func take(line: String) {
         switch StreamJSON.parse(line) {
         case .user(let text):
@@ -339,16 +339,17 @@ actor HeadlessRunner {
             if streamOut { output.line(StreamJSON.result(.errorDuringExecution, text: message, sessionID: id)) } else { output.error(message) }
             return false
         }
-        let lines = StreamJSONTurn(model: await conversation.model, partialMessages: partialMessages, output: output)
+        // The turn's lines, when stream-json was asked for; else its text.
+        let lines = streamOut ? StreamJSONTurn(model: await conversation.model, partialMessages: partialMessages, output: output) : nil
         do {
-            try await conversation.run(text) { [streamOut, output] event in
-                if streamOut {
+            try await conversation.run(text) { [output] event in
+                if let lines {
                     await lines.handle(event)
                 } else if case .delta(let piece, _) = event {
                     output.text(piece)
                 }
             }
-            if streamOut { output.line(StreamJSON.result(.success, text: await lines.lastText, sessionID: id)) } else { output.text("\n") }
+            if let lines { output.line(StreamJSON.result(.success, text: await lines.lastText, sessionID: id)) } else { output.text("\n") }
             return true
         } catch {
             let message = error is CancellationError ? "Interrupted" : (error as? LocalizedError)?.errorDescription ?? "\(error)"

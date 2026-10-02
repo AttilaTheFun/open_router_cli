@@ -20,17 +20,6 @@ public struct ORModel: Codable, Identifiable, Hashable, Sendable {
     public struct Pricing: Codable, Hashable, Sendable {
         public let prompt: String?
         public let completion: String?
-        public init(prompt: String?, completion: String?) { self.prompt = prompt; self.completion = completion }
-    }
-
-    public init(id: String, name: String? = nil, contextLength: Int? = nil, supportedParameters: [String]? = nil,
-                pricing: Pricing? = nil, created: Double? = nil) {
-        self.id = id
-        self.name = name
-        self.contextLength = contextLength
-        self.supportedParameters = supportedParameters
-        self.pricing = pricing
-        self.created = created
     }
 
     /// Whether it can call tools (the agent needs this).
@@ -205,14 +194,57 @@ public struct ORToolSchemaError: LocalizedError, Equatable {
 }
 
 extension ORTool {
-    /// The tool as the API's `tools` array wants it. Throws when its
-    /// parameters are not a JSON object: sent as "takes anything", the
-    /// model would call it blind.
-    func wire() throws -> [String: Any] {
-        guard let parameters = (try? JSONSerialization.jsonObject(with: Data(parametersJSON.utf8))) as? [String: Any] else {
+    /// The tool's parameters as the API's `tools` array wants them: a
+    /// JSON object. Throws when `parametersJSON` is not one: sent as
+    /// "takes anything", the model would call the tool blind.
+    func parameters() throws -> JSONValue {
+        guard let value = try? JSONDecoder().decode(JSONValue.self, from: Data(parametersJSON.utf8)), case .object = value else {
             throw ORToolSchemaError(tool: name)
         }
-        return ["type": "function", "function": ["name": name, "description": toolDescription, "parameters": parameters]]
+        return value
+    }
+}
+
+/// Any JSON value: what a tool's parameter schema is made of.
+enum JSONValue: Codable, Equatable, Sendable {
+    case null
+    case bool(Bool)
+    case integer(Int)
+    case number(Double)
+    case string(String)
+    case array([JSONValue])
+    case object([String: JSONValue])
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() {
+            self = .null
+        } else if let value = try? container.decode(Bool.self) {
+            self = .bool(value)
+        } else if let value = try? container.decode(Int.self) {
+            self = .integer(value)
+        } else if let value = try? container.decode(Double.self) {
+            self = .number(value)
+        } else if let value = try? container.decode(String.self) {
+            self = .string(value)
+        } else if let value = try? container.decode([JSONValue].self) {
+            self = .array(value)
+        } else {
+            self = .object(try container.decode([String: JSONValue].self))
+        }
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .null: try container.encodeNil()
+        case .bool(let value): try container.encode(value)
+        case .integer(let value): try container.encode(value)
+        case .number(let value): try container.encode(value)
+        case .string(let value): try container.encode(value)
+        case .array(let value): try container.encode(value)
+        case .object(let value): try container.encode(value)
+        }
     }
 }
 
@@ -221,17 +253,14 @@ public struct ORChatRequest: Sendable {
     public var model: String
     public var messages: [ORMessage]
     public var tools: [any ORTool]
-    public var temperature: Double?
     /// OpenRouter's reasoning effort ("low", "medium", "high"), for the
     /// models that take one; nil leaves the model's default.
     public var reasoningEffort: String?
 
-    public init(model: String, messages: [ORMessage], tools: [any ORTool] = [], temperature: Double? = nil,
-                reasoningEffort: String? = nil) {
+    public init(model: String, messages: [ORMessage], tools: [any ORTool] = [], reasoningEffort: String? = nil) {
         self.model = model
         self.messages = messages
         self.tools = tools
-        self.temperature = temperature
         self.reasoningEffort = reasoningEffort
     }
 }

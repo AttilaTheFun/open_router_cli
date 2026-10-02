@@ -120,7 +120,7 @@ private let hello = ["choices": [["delta": ["content": "Hello"]]]]
     let mock = MockTransport(streams: [[try sse(hello), try sse(["choices": [["delta": [String: Any](), "finish_reason": "length"]]]), "data: [DONE]"]])
     let agent = ORAgent(client: OpenRouterClient(apiKey: "k", transport: mock), model: "m")
     let error = await #expect(throws: ORAgentError.self) { try await agent.send("hi") { _ in } }
-    #expect(error == .replyCutOff(reason: "length"))
+    #expect(error == .replyCutOff(.length))
     #expect(error?.errorDescription == "The reply was cut off: the model reached its output limit.")
     #expect(await agent.history == [ORMessage(role: .user, content: "hi"), ORMessage(role: .assistant, content: "Hello")])
 }
@@ -136,7 +136,7 @@ private let hello = ["choices": [["delta": ["content": "Hello"]]]]
     ]])
     let agent = ORAgent(client: OpenRouterClient(apiKey: "k", transport: mock), model: "m", tools: [EchoTool()])
     let recorder = Recorder<ORAgentEvent>()
-    await #expect(throws: ORAgentError.replyCutOff(reason: "length")) { try await agent.send("hi") { await recorder.add($0) } }
+    await #expect(throws: ORAgentError.replyCutOff(.length)) { try await agent.send("hi") { await recorder.add($0) } }
     #expect(await agent.history == [ORMessage(role: .user, content: "hi"), ORMessage(role: .assistant, content: "Writing. ")])
     #expect(await recorder.events.contains { if case .toolCall = $0 { true } else { false } } == false)
     #expect(await mock.sentBodies.count == 1)
@@ -148,7 +148,7 @@ private let hello = ["choices": [["delta": ["content": "Hello"]]]]
         [try sse(["choices": [["delta": [String: Any](), "finish_reason": "stop"]]]), "data: [DONE]"],
     ])
     let agent = ORAgent(client: OpenRouterClient(apiKey: "k", transport: mock), model: "m")
-    await #expect(throws: ORAgentError.replyCutOff(reason: "content_filter")) { try await agent.send("one") { _ in } }
+    await #expect(throws: ORAgentError.replyCutOff(.contentFilter)) { try await agent.send("one") { _ in } }
     await #expect(throws: ORAgentError.emptyReply) { try await agent.send("two") { _ in } }
     // Neither left an empty assistant message behind.
     #expect(await agent.history.map(\.role) == [.user, .user])
