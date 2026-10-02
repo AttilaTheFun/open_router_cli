@@ -260,10 +260,10 @@ actor StreamJSONTurn {
     }
 }
 
-/// The headless loop: stdin lines in, stream-json (or text) out. Turns
-/// run one at a time; a message arriving mid-turn waits its turn; an
-/// interrupt cancels the turn in flight, which ends with an error result
-/// of its own.
+/// The headless mode's turns: messages in, stream-json (or text) out.
+/// Turns run one at a time; a message arriving mid-turn waits its turn;
+/// an interrupt cancels the turn in flight, which ends with an error
+/// result of its own.
 actor HeadlessRunner {
     private let conversation: Conversation
     private let streamOut: Bool
@@ -281,6 +281,24 @@ actor HeadlessRunner {
         self.streamOut = streamOut
         self.partialMessages = partialMessages
         self.output = output
+    }
+
+    /// Takes one line of stream-json input: a user message is queued, a
+    /// control request is carried out or refused, and answered either
+    /// way. A line that is neither is passed over, as Claude Code passes
+    /// over lines it has no use for.
+    func take(line: String) {
+        switch StreamJSON.parse(line) {
+        case .user(let text):
+            enqueue(text)
+        case .interrupt(let requestID):
+            interrupt()
+            if streamOut { output.line(StreamJSON.controlResponse(requestID: requestID)) }
+        case .control(let requestID, let subtype):
+            if streamOut { output.line(StreamJSON.controlError(requestID: requestID, error: "openrouter does not take the control request \"\(subtype)\"")) }
+        case nil:
+            break
+        }
     }
 
     func enqueue(_ text: String) {
@@ -314,6 +332,13 @@ actor HeadlessRunner {
     @discardableResult
     func turn(_ text: String) async -> Bool {
         let id = conversation.id
+        // A message with no text (only images, say) is not sent as an
+        // empty one: the model takes text, and the host is told.
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            let message = "The message has no text, and openrouter takes only text."
+            if streamOut { output.line(StreamJSON.result(.errorDuringExecution, text: message, sessionID: id)) } else { output.error(message) }
+            return false
+        }
         let lines = StreamJSONTurn(model: await conversation.model, partialMessages: partialMessages, output: output)
         do {
             try await conversation.run(text) { [streamOut, output] event in

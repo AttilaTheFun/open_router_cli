@@ -21,6 +21,9 @@
 // In (stdin):
 //   {"type":"user","message":{"role":"user","content":[{"type":"text","text":…}]}}   (or "content":"…")
 //   {"type":"control_request","request_id":…,"request":{"subtype":"interrupt"}}
+// and out again for each control request:
+//   {"type":"control_response","response":{"request_id":…,"subtype":"success"}}
+//   {"type":"control_response","response":{"request_id":…,"subtype":"error","error":…}}   (anything but an interrupt)
 
 import Foundation
 
@@ -78,8 +81,15 @@ public enum StreamJSON {
         line(["type": "result", "subtype": kind.rawValue, "is_error": kind != .success, "result": text, "session_id": sessionID])
     }
 
+    /// The answer to a control request that was carried out.
     public static func controlResponse(requestID: String) -> String {
         line(["type": "control_response", "response": ["request_id": requestID, "subtype": "success"]])
+    }
+
+    /// The answer to a control request that was not, and why: a host
+    /// that waits for an answer gets one either way.
+    public static func controlError(requestID: String, error: String) -> String {
+        line(["type": "control_response", "response": ["request_id": requestID, "subtype": "error", "error": error]])
     }
 
     static func line(_ object: [String: Any]) -> String {
@@ -90,10 +100,14 @@ public enum StreamJSON {
     // MARK: In
 
     public enum Input: Equatable, Sendable {
-        /// A user turn: the text of its content blocks, joined.
+        /// A user turn: the text of its content blocks, joined. Empty
+        /// when the message has no text (only images, say).
         case user(String)
         /// Interrupt the turn in flight.
         case interrupt(requestID: String)
+        /// A control request other than an interrupt, by its subtype
+        /// (Claude Code has several: `initialize`, `set_model`, …).
+        case control(requestID: String, subtype: String)
     }
 
     public static func parse(_ line: String) -> Input? {
@@ -107,8 +121,9 @@ public enum StreamJSON {
             let text = blocks.filter { $0["type"] as? String == "text" }.compactMap { $0["text"] as? String }.joined(separator: "\n")
             return .user(text)
         case "control_request":
-            guard (object["request"] as? [String: Any])?["subtype"] as? String == "interrupt" else { return nil }
-            return .interrupt(requestID: object["request_id"] as? String ?? "")
+            let requestID = object["request_id"] as? String ?? ""
+            let subtype = (object["request"] as? [String: Any])?["subtype"] as? String ?? ""
+            return subtype == "interrupt" ? .interrupt(requestID: requestID) : .control(requestID: requestID, subtype: subtype)
         default:
             return nil
         }

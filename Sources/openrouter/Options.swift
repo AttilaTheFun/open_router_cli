@@ -2,7 +2,9 @@
 // that drives Claude Code passes, so the same host drives this unchanged.
 // Some of those are honoured, and some have nothing here to act on: those
 // are taken, do nothing, and the CLI says so on stderr rather than let a
-// host or a person think they were applied.
+// host or a person think they were applied. An option that is neither is
+// refused, as Claude Code refuses one it does not know: taking it would
+// be pretending, and what followed it would be read as the prompt.
 
 import Foundation
 
@@ -11,9 +13,6 @@ struct Options {
     var positional: [String] = []
     var values: [String: String] = [:]
     var flags: Set<String> = []
-    /// Options that are not this CLI's nor among Claude Code's it knows,
-    /// as given. Each is taken as a switch and ignored.
-    var unknown: [String] = []
     /// `--max-turns`: how many rounds of tool calls a turn may take.
     var maxTurns: Int?
 
@@ -21,7 +20,7 @@ struct Options {
 
     /// Options that take a value.
     static let valued: Set<String> = [
-        "model", "effort", "resume", "session-id", "cwd", "input-format", "output-format", "max-turns", "key",
+        "model", "effort", "resume", "session-id", "cwd", "input-format", "output-format", "max-turns",
         // Claude Code's, taken and not acted on (see `notes`).
         "permission-mode", "permission-prompt-tool", "mcp-config",
     ]
@@ -35,37 +34,61 @@ struct Options {
         "verbose", "dangerously-skip-permissions",
     ]
 
-    /// Throws `BadOption` for an option that needs a value and has none,
-    /// or has one it cannot take.
+    /// What `--input-format` and `--output-format` may be. (Claude Code's
+    /// `json` output, one object at the end, is not among them.)
+    static let formats: Set<String> = ["text", "stream-json"]
+
+    /// Throws `BadOption` for an option this CLI does not take, one that
+    /// needs a value and has none, a switch given one, and a value an
+    /// option cannot take.
     init(_ arguments: [String]) throws {
         var rest = arguments[...]
         if let first = rest.first, Self.commands.contains(first) {
             command = first
             rest = rest.dropFirst()
         }
+        /// The value after an option, taken off the arguments.
+        func value(of option: String) throws -> String {
+            guard let value = rest.first else { throw BadOption(message: "\(option) needs a value") }
+            rest = rest.dropFirst()
+            return value
+        }
         while let argument = rest.first {
             rest = rest.dropFirst()
             if argument == "-p" || argument == "--print" { flags.insert("p"); continue }
             if argument == "-h" { flags.insert("help"); continue }
-            if argument == "-m", let value = rest.first { values["model"] = value; rest = rest.dropFirst(); continue }
+            if argument == "-m" { values["model"] = try value(of: argument); continue }
+            // After "--", everything is the prompt, whatever it looks like.
+            if argument == "--" { positional.append(contentsOf: rest); break }
+            // A dash and a letter is an option, and not one of the three
+            // above; anything else that is not "--name" is a prompt's word.
+            if argument.count == 2, argument.hasPrefix("-"), argument.last?.isLetter == true {
+                throw BadOption(message: "\(argument) is not an option openrouter takes")
+            }
             guard argument.hasPrefix("--") else { positional.append(argument); continue }
-            let name = String(argument.dropFirst(2))
+            var name = String(argument.dropFirst(2))
+            var given: String?
             if let equals = name.firstIndex(of: "=") {
-                let key = String(name[..<equals])
-                values[key] = String(name[name.index(after: equals)...])
-                if !Self.valued.contains(key) { unknown.append("--" + key) }
-            } else if Self.valued.contains(name) {
-                guard let value = rest.first else { throw BadOption(message: "\(argument) needs a value") }
-                values[name] = value
-                rest = rest.dropFirst()
-            } else {
+                given = String(name[name.index(after: equals)...])
+                name = String(name[..<equals])
+            }
+            if Self.valued.contains(name) {
+                values[name] = try given ?? value(of: argument)
+            } else if Self.switches.contains(name) {
+                guard given == nil else { throw BadOption(message: "--\(name) takes no value") }
                 flags.insert(name)
-                if !Self.switches.contains(name) { unknown.append(argument) }
+            } else {
+                throw BadOption(message: "--\(name) is not an option openrouter takes")
             }
         }
         if let text = values["max-turns"] {
             guard let turns = Int(text), turns > 0 else { throw BadOption(message: "--max-turns takes a number above zero, not \"\(text)\"") }
             maxTurns = turns
+        }
+        for option in ["input-format", "output-format"] {
+            if let format = values[option], !Self.formats.contains(format) {
+                throw BadOption(message: "--\(option) is text or stream-json, not \"\(format)\"")
+            }
         }
     }
 
@@ -90,9 +113,6 @@ struct Options {
         }
         if values["mcp-config"] != nil {
             notes.append("--mcp-config is not used: openrouter does not connect to MCP servers, and the model is not offered their tools.")
-        }
-        for option in unknown {
-            notes.append("\(option) is not an option openrouter knows; it is ignored.")
         }
         return notes
     }

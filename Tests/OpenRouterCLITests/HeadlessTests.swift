@@ -419,3 +419,45 @@ private func logLines(_ rig: Rig) throws -> [ORLogLine] {
     #expect(root["permissionMode"] as? String == "bypassPermissions")
     #expect((root["mcp_servers"] as? [Any])?.isEmpty == true)
 }
+
+/// The lines a host writes on stdin: a message is run, an interrupt and
+/// any other control request are each answered, and a line that is
+/// neither is passed over.
+@Test(.timeLimit(.minutes(1))) func stdinLinesAreRunOrAnswered() async throws {
+    let rig = try Rig(streams: [try reply("hello back")])
+    await rig.runner.take(line: #"{"type":"control_request","request_id":"init-1","request":{"subtype":"initialize"}}"#)
+    await rig.runner.take(line: #"{"type":"keep_alive"}"#)
+    await rig.runner.take(line: "not json")
+    await rig.runner.take(line: #"{"type":"control_request","request_id":"int-1","request":{"subtype":"interrupt"}}"#)
+    await rig.runner.take(line: #"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}"#)
+    await rig.runner.drain()
+    let lines = try objects(try rig.written().out)
+    #expect(lines.map { $0["type"] as? String } == ["control_response", "control_response", "stream_event", "stream_event", "assistant", "result"])
+    // A request it does not take is refused, not left unanswered.
+    #expect(lines[0]["response"] as? [String: String] == ["request_id": "init-1", "subtype": "error",
+                                                          "error": "openrouter does not take the control request \"initialize\""])
+    // An interrupt with no turn in flight is still answered.
+    #expect(lines[1]["response"] as? [String: String] == ["request_id": "int-1", "subtype": "success"])
+    #expect(lines[5]["result"] as? String == "hello back")
+    #expect(try await rig.mock.sentMessages().first?.last == ["role": "user", "content": "hello"])
+}
+
+/// A message with no text is not sent to the model as an empty one: its
+/// turn ends at once with an error, and the next message runs.
+@Test(.timeLimit(.minutes(1))) func aMessageWithNoTextIsRefused() async throws {
+    let rig = try Rig(streams: [try reply("fine")])
+    await rig.runner.take(line: #"{"type":"user","message":{"role":"user","content":[{"type":"image","source":{}}]}}"#)
+    await rig.runner.take(line: #"{"type":"user","message":{"role":"user","content":"  \n"}}"#)
+    await rig.runner.take(line: #"{"type":"user","message":{"role":"user","content":"words"}}"#)
+    await rig.runner.drain()
+    let lines = try objects(try rig.written().out)
+    #expect(lines.map { $0["type"] as? String } == ["result", "result", "stream_event", "stream_event", "assistant", "result"])
+    for refused in lines.prefix(2) {
+        #expect(refused["is_error"] as? Bool == true)
+        #expect(refused["result"] as? String == "The message has no text, and openrouter takes only text.")
+    }
+    #expect(lines[5]["is_error"] as? Bool == false)
+    // Only the message with words reached the model or the session.
+    #expect(await rig.mock.sentBodies.count == 1)
+    #expect(try rig.store.load(id: rig.conversation.id).messages.map(\.content) == ["words", "fine"])
+}

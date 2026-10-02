@@ -1,8 +1,8 @@
 // openrouter: a coding agent on OpenRouter's models, in the terminal and
 // headless. Configured on its own (`openrouter auth login`), the way
 // `claude` and `codex` are; a host such as Visor only runs it. `usage()`
-// below is the list of what it takes; Options.swift says which of Claude
-// Code's options are taken and not acted on.
+// below lists the commands and options; Options.swift says which of
+// Claude Code's options are taken and not acted on.
 
 import Foundation
 import OpenRouterKit
@@ -29,16 +29,21 @@ func usage() {
           openrouter auth status | login [KEY] | logout                   the key (or OPENROUTER_API_KEY)
           openrouter models [--free] [--tools] [--json] [--refresh]       what OpenRouter offers (kept in ~/.openrouter/models.json)
           openrouter sessions [--cwd DIR] [--json]                        sessions kept in ~/.openrouter/sessions
+          openrouter help | version                                       this; the version (also --help, -h, --version)
         Options:
+          -p, --print                  headless: run the turn and exit
           --model M, -m M              the model (default: the config's, else \(ORConfig.defaultModel))
           --effort low|medium|high     reasoning effort, for models that take one (xhigh and max read as high)
-          --resume ID, --session-id ID carry a session on; the id a new session gets
-          --cwd DIR                    the folder to work in (default: this one)
-          --max-turns N                rounds of tool calls a turn may take (default 24)
+          --resume ID                  carry a session on, in the folder it was working in
+          --session-id ID              the id a new session gets
+          --cwd DIR                    the folder to work in (default: this one, or a resumed session's own)
+          --max-turns N                rounds of tool calls a turn may take (default \(ORAgent.defaultMaxRounds))
+          --input-format, --output-format text|stream-json
           --include-partial-messages   with stream-json output: the reply's text as it is written
         Tools run without asking; openrouter has no permission modes and no MCP. Claude Code's
         --permission-mode, --permission-prompt-tool, --mcp-config, --verbose and --dangerously-skip-permissions
-        are taken, so that a host's command line works, and change nothing; the first three are noted on stderr.
+        are taken, so that a host's command line works, and change nothing; a permission mode other than
+        bypassPermissions, a prompt tool and an MCP config are each noted on stderr. Any other option is refused.
         Config: ~/.openrouter/config.json ({"apiKey": …, "model": …}); OPENROUTER_HOME moves it.
         """)
 }
@@ -62,7 +67,7 @@ func readSecret(prompt: String) -> String {
 func auth(_ subcommand: String?, _ rest: [String]) async -> Int32 {
     switch subcommand {
     case "login":
-        var key = rest.first ?? options.values["key"] ?? ""
+        var key = rest.first ?? ""
         if key.isEmpty { key = readSecret(prompt: "OpenRouter API key (https://openrouter.ai/keys): ") }
         key = key.trimmingCharacters(in: .whitespacesAndNewlines)
         guard key.hasPrefix("sk-or-") else { output.error("That does not look like an OpenRouter key (they start with sk-or-)."); return 1 }
@@ -161,15 +166,7 @@ func headless() async -> Int32 {
                                 partialMessages: options.flags.contains("include-partial-messages"), output: output)
     if streamIn {
         do {
-            for try await line in FileHandle.standardInput.bytes.lines {
-                guard let input = StreamJSON.parse(line) else { continue }
-                switch input {
-                case .user(let text): await runner.enqueue(text)
-                case .interrupt(let requestID):
-                    await runner.interrupt()
-                    if streamOut { output.line(StreamJSON.controlResponse(requestID: requestID)) }
-                }
-            }
+            for try await line in FileHandle.standardInput.bytes.lines { await runner.take(line: line) }
         } catch {
             output.error("stdin: \(error.localizedDescription)")
         }
@@ -180,7 +177,7 @@ func headless() async -> Int32 {
     if prompt.isEmpty, let data = try? FileHandle.standardInput.readToEnd() {
         prompt = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
     }
-    guard !prompt.isEmpty else { output.error("Nothing to say: give a prompt, or pipe one in."); return 2 }
+    guard !prompt.isEmpty else { output.error("openrouter: nothing to say: give a prompt, or pipe one in."); return 2 }
     // One turn: its failure is the command's.
     return await runner.turn(prompt) ? 0 : 1
 }
