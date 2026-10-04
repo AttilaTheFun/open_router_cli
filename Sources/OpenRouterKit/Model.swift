@@ -269,8 +269,9 @@ public struct ORChatRequest: Sendable {
 public enum ORStreamEvent: Sendable {
     /// More assistant text.
     case token(String)
-    /// The tokens the request and reply used, when reported.
-    case usage(prompt: Int, completion: Int)
+    /// The tokens the request and reply used, and their cost, when
+    /// reported.
+    case usage(ORUsage)
 }
 
 /// A completion, whole.

@@ -7,7 +7,7 @@
 import Foundation
 import OpenRouterKit
 
-let version = "0.3.0"
+let version = "0.4.0"
 
 let output = Output.standard
 let options: Options
@@ -177,7 +177,7 @@ func headless() async -> Int32 {
     }
     if streamOut {
         output.line(StreamJSON.systemInit(sessionID: conversation.id, model: await conversation.model, cwd: conversation.cwd,
-                                          tools: CodingTools.standard(cwd: conversation.cwd).map(\.name)))
+                                          tools: CodingTools.standard(cwd: conversation.cwd).map(\.name), apiKeySource: ORConfig.keySourceName()))
     }
     // A host reads the model list from disk; keep it no older than a day.
     // The list is public, so this needs no key. It is fetched beside the

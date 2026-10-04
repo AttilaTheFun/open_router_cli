@@ -56,6 +56,25 @@ public struct OpenRouterClient: Sendable {
         }
     }
 
+    /// What OpenRouter says of the key: its spending and its limit.
+    public func keyStatus() async throws -> ORKeyStatus {
+        try await read(ORKeyStatus.self, from: "key")
+    }
+
+    /// The credits on the key's account.
+    public func credits() async throws -> ORCredits {
+        try await read(ORCredits.self, from: "credits")
+    }
+
+    /// A GET whose answer is `{"data": …}`.
+    private func read<Value: Decodable>(_ type: Value.Type, from path: String) async throws -> Value {
+        let (data, response) = try await transport.data(for: authorized(Self.baseURL.appendingPathComponent(path), method: "GET"))
+        guard (200..<300).contains(response.statusCode) else {
+            throw OpenRouterError(status: response.statusCode, body: String(decoding: data, as: UTF8.self))
+        }
+        return try JSONDecoder().decode(DataAnswer<Value>.self, from: data).data
+    }
+
     /// The models OpenRouter offers, id-sorted; with a category
     /// ("programming"), that category's models in OpenRouter's order.
     public func models(category: String? = nil) async throws -> [ORModel] {
@@ -124,6 +143,12 @@ public struct OpenRouterClient: Sendable {
             let effort: String
         }
 
+        /// Asks for the completion's cost with its tokens, at the end of
+        /// the stream.
+        struct Usage: Encodable {
+            let include = true
+        }
+
         struct Tool: Encodable {
             struct Function: Encodable {
                 let name: String
@@ -140,6 +165,7 @@ public struct OpenRouterClient: Sendable {
         let stream = true
         let reasoning: Reasoning?
         let tools: [Tool]?
+        let usage = Usage()
     }
 
     static func body(_ chat: ORChatRequest) throws -> Data {
@@ -153,4 +179,9 @@ public struct OpenRouterClient: Sendable {
         encoder.outputFormatting = [.withoutEscapingSlashes, .sortedKeys]
         return try encoder.encode(Body(model: chat.model, messages: chat.messages, reasoning: effort, tools: tools.isEmpty ? nil : tools))
     }
+}
+
+/// An answer of the API's that carries what was asked for in `data`.
+private struct DataAnswer<Value: Decodable>: Decodable {
+    let data: Value
 }

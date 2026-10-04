@@ -112,6 +112,14 @@ public struct ORConfig: Codable, Sendable, Equatable {
         return fileKey(environment) == nil ? nil : file(environment: environment).path
     }
 
+    /// Where the key came from, as Claude Code's `apiKeySource` says it:
+    /// the environment variable's name, or "config". Nil exactly when
+    /// there is no key.
+    public static func keySourceName(environment: [String: String] = ProcessInfo.processInfo.environment) -> String? {
+        if let found = environmentKey(environment) { return found.name }
+        return fileKey(environment) == nil ? nil : "config"
+    }
+
     /// The model to run: the one asked for, else the config's, else the default.
     public static func model(requested: String?, environment: [String: String] = ProcessInfo.processInfo.environment) -> String {
         if let requested, !requested.isEmpty { return requested }

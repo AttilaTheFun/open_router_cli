@@ -4,14 +4,21 @@
 // `claude` this way drives `openrouter` the same, unchanged.
 //
 // Out (stdout):
-//   {"type":"system","subtype":"init","session_id":…,"model":…,"cwd":…,"tools":[…],"permissionMode":"bypassPermissions","mcp_servers":[]}
+//   {"type":"system","subtype":"init","session_id":…,"model":…,"cwd":…,"tools":[…],"permissionMode":"bypassPermissions","mcp_servers":[],"apiKeySource":…}
 //   {"type":"stream_event","event":{"type":"message_start","message":{"id":…}}}                                  (with --include-partial-messages)
 //   {"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":…}}}        (the same)
 //   {"type":"assistant","message":{"id":…,"model":…,"usage":{…},"content":[{"type":"text",…},{"type":"tool_use",…}]}}
 //   {"type":"user","uuid":…,"message":{"content":[{"type":"tool_result","tool_use_id":…,"content":…}]}}
-//   {"type":"result","subtype":"success","is_error":false,"result":…}
+//   {"type":"result","subtype":"success","is_error":false,"result":…,"total_cost_usd":…,"modelUsage":{…}}
 //   {"type":"result","subtype":"error_during_execution","is_error":true,"result":…}   (a failed or interrupted turn)
 //   {"type":"result","subtype":"error_max_turns","is_error":true,"result":…}          (a turn out of rounds)
+//   {"type":"system","subtype":"usage_limits","key":{"limit":…,"limit_remaining":…,"limit_reset":…,"usage":…,"is_free_tier":…},
+//    "credits":{"total_credits":…,"total_usage":…}}                                   (after a turn; openrouter's own)
+// A result carries what the run has used so far, as Claude Code's does:
+// the cost in dollars, and each model's tokens, those read from a cache
+// apart (`modelUsage`). The usage_limits line is openrouter's own: the
+// key's limit and the account's credits, in dollars, as OpenRouter gives
+// them, for a host to show how near the limits it is.
 // An assistant message has one id: `message_start` and `assistant` carry
 // it, and so does the message's line in the session log. A tool call has
 // one id: the `tool_use` block's, which its `tool_result` names in
@@ -33,9 +40,13 @@ public enum StreamJSON {
     /// The first line. `permissionMode` and `mcp_servers` are what is in
     /// effect, whatever the command line asked for: the agent's tools run
     /// without asking, and it connects to no MCP server.
-    public static func systemInit(sessionID: String, model: String, cwd: String, tools: [String]) -> String {
-        line(["type": "system", "subtype": "init", "session_id": sessionID, "model": model, "cwd": cwd, "tools": tools,
-              "permissionMode": "bypassPermissions", "mcp_servers": [String]()])
+    /// `apiKeySource`: where the key came from (`ORConfig.keySourceName`),
+    /// left out when there is none.
+    public static func systemInit(sessionID: String, model: String, cwd: String, tools: [String], apiKeySource: String? = nil) -> String {
+        var object: [String: Any] = ["type": "system", "subtype": "init", "session_id": sessionID, "model": model, "cwd": cwd, "tools": tools,
+                                     "permissionMode": "bypassPermissions", "mcp_servers": [String]()]
+        if let apiKeySource { object["apiKeySource"] = apiKeySource }
+        return line(object)
     }
 
     public static func messageStart(id: String) -> String {
@@ -49,7 +60,7 @@ public enum StreamJSON {
     /// The finished assistant message: its text, then a tool_use block per
     /// call (the arguments as a JSON object, or `{"input": <text>}` when
     /// the model's arguments did not parse).
-    public static func assistant(id: String, model: String, message: ORMessage, usage: (prompt: Int, completion: Int)?) -> String {
+    public static func assistant(id: String, model: String, message: ORMessage, usage: ORUsage?) -> String {
         var content: [[String: Any]] = []
         if let text = message.content, !text.isEmpty { content.append(["type": "text", "text": text]) }
         for call in message.toolCalls ?? [] {
@@ -57,7 +68,11 @@ public enum StreamJSON {
             content.append(["type": "tool_use", "id": call.id, "name": call.function.name, "input": input ?? ["input": call.function.arguments]])
         }
         var body: [String: Any] = ["id": id, "role": "assistant", "model": model, "content": content]
-        if let usage { body["usage"] = ["input_tokens": usage.prompt, "output_tokens": usage.completion] }
+        // As Claude Code counts them: the prompt's tokens read from a
+        // cache apart from the rest.
+        if let usage {
+            body["usage"] = ["input_tokens": usage.prompt - usage.cached, "cache_read_input_tokens": usage.cached, "output_tokens": usage.completion]
+        }
         return line(["type": "assistant", "message": body])
     }
 
@@ -77,8 +92,34 @@ public enum StreamJSON {
         case errorMaxTurns = "error_max_turns"
     }
 
-    public static func result(_ kind: ResultKind, text: String, sessionID: String) -> String {
-        line(["type": "result", "subtype": kind.rawValue, "is_error": kind != .success, "result": text, "session_id": sessionID])
+    /// - Parameter spent: what the run has used so far, by model.
+    public static func result(_ kind: ResultKind, text: String, sessionID: String, spent: [String: ORUsage] = [:]) -> String {
+        var object: [String: Any] = ["type": "result", "subtype": kind.rawValue, "is_error": kind != .success, "result": text, "session_id": sessionID]
+        if !spent.isEmpty {
+            object["modelUsage"] = spent.mapValues { usage in
+                var model: [String: Any] = ["inputTokens": usage.prompt - usage.cached, "cacheReadInputTokens": usage.cached,
+                                            "cacheCreationInputTokens": 0, "outputTokens": usage.completion]
+                if let cost = usage.cost { model["costUSD"] = cost }
+                return model
+            }
+            let costs = spent.values.compactMap(\.cost)
+            if !costs.isEmpty { object["total_cost_usd"] = costs.reduce(0, +) }
+        }
+        return line(object)
+    }
+
+    /// The key's limit and the account's credits, as OpenRouter gave them.
+    public static func usageLimits(key: ORKeyStatus?, credits: ORCredits?) -> String {
+        var object: [String: Any] = ["type": "system", "subtype": "usage_limits"]
+        if let key {
+            var status: [String: Any] = ["usage": key.usage, "is_free_tier": key.isFreeTier]
+            status["limit"] = key.limit ?? NSNull()
+            status["limit_remaining"] = key.limitRemaining ?? NSNull()
+            status["limit_reset"] = key.limitReset ?? NSNull()
+            object["key"] = status
+        }
+        if let credits { object["credits"] = ["total_credits": credits.totalCredits, "total_usage": credits.totalUsage] }
+        return line(object)
     }
 
     /// The answer to a control request that was carried out.

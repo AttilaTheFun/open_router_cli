@@ -17,7 +17,7 @@ private func complete(_ transport: MockTransport) async throws -> (tokens: Strin
     for event in await recorder.events {
         switch event {
         case .token(let text): tokens += text
-        case .usage(let prompt, let completion): usage = [prompt, completion]
+        case .usage(let reported): usage = [reported.prompt, reported.completion]
         }
     }
     return (tokens, usage, completion)
