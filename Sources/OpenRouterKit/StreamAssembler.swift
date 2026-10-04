@@ -29,7 +29,10 @@ struct StreamAssembler {
         if let usage = root["usage"] as? [String: Any] {
             let prompt = usage["prompt_tokens"] as? Int ?? 0
             let completion = usage["completion_tokens"] as? Int ?? 0
-            if prompt > 0 || completion > 0 { events.append(.usage(prompt: prompt, completion: completion)) }
+            let cached = (usage["prompt_tokens_details"] as? [String: Any])?["cached_tokens"] as? Int ?? 0
+            if prompt > 0 || completion > 0 {
+                events.append(.usage(ORUsage(prompt: prompt, cached: cached, completion: completion, cost: usage["cost"] as? Double)))
+            }
         }
         guard let choices = root["choices"] as? [[String: Any]], let choice = choices.first else { return events }
         if let reason = choice["finish_reason"] as? String { finishReason = reason }

@@ -25,8 +25,9 @@ public enum ORAgentEvent: Sendable {
     /// consumer that keeps the message keeps it under it, so whoever
     /// watched the message stream finds it on record by the same name.
     case assistant(ORMessage, id: String)
-    /// The context so far, when reported.
-    case usage(prompt: Int, completion: Int)
+    /// What a completion used: the context so far, and its cost, when
+    /// reported.
+    case usage(ORUsage)
 }
 
 public enum ORAgentError: LocalizedError, Equatable {
@@ -142,7 +143,7 @@ public actor ORAgent {
             let completion = try await client.complete(request) { event in
                 switch event {
                 case .token(let text): await onEvent(.delta(text, messageID: messageID))
-                case .usage(let prompt, let completion): await onEvent(.usage(prompt: prompt, completion: completion))
+                case .usage(let usage): await onEvent(.usage(usage))
                 }
             }
             var message = completion.message

@@ -20,8 +20,8 @@ private struct Rig {
     private let err = Pipe()
 
     init(streams: [[String]], status: Int = 200, failure: URLError? = nil, key: String = "k", streamOut: Bool = true,
-         partialMessages: Bool = true, maxRounds: Int? = nil, sessions: URL? = nil) throws {
-        let mock = MockTransport(streams: streams, status: status, failure: failure)
+         partialMessages: Bool = true, maxRounds: Int? = nil, sessions: URL? = nil, answers: [String: (status: Int, body: String)] = [:]) throws {
+        let mock = MockTransport(streams: streams, status: status, dataBody: Data(), answers: answers, failure: failure)
         self.mock = mock
         cwd = try scratch()
         store = ORSessionStore(directory: try sessions ?? scratch().appendingPathComponent("sessions"))
@@ -498,19 +498,28 @@ private func logLines(_ rig: Rig) throws -> [ORLogLine] {
 }
 
 /// The tokens a completion reports go on its assistant line, and on that
-/// one only; a failed tool's result line says it failed.
+/// one only, with those read from a cache apart; the result says what the
+/// run has used so far, and its cost; a failed tool's result line says it
+/// failed.
 @Test(.timeLimit(.minutes(1))) func usageAndToolFailuresReachTheLines() async throws {
     var first = try toolCalls([("call_1", "read_file", ["path": "nowhere.txt"])])
-    first.insert(try sse(["choices": [[String: Any]](), "usage": ["prompt_tokens": 120, "completion_tokens": 8]]), at: first.count - 1)
-    let rig = try Rig(streams: [first, try reply("It is not there.")])
+    first.insert(try sse(["choices": [[String: Any]](), "usage": ["prompt_tokens": 120, "completion_tokens": 8, "cost": 0.25,
+                                                                  "prompt_tokens_details": ["cached_tokens": 100]]]), at: first.count - 1)
+    var second = try reply("It is not there.")
+    second.insert(try sse(["choices": [[String: Any]](), "usage": ["prompt_tokens": 140, "completion_tokens": 6, "cost": 0.5]]), at: second.count - 1)
+    let rig = try Rig(streams: [first, second])
     #expect(await rig.runner.turn("read it"))
     let lines = try objects(try rig.written().out)
     #expect(lines.map { $0["type"] as? String } == ["stream_event", "assistant", "user", "stream_event", "stream_event", "assistant", "result"])
     let asked = try #require(lines[1]["message"] as? [String: Any])
-    #expect(asked["usage"] as? [String: Int] == ["input_tokens": 120, "output_tokens": 8])
+    #expect(asked["usage"] as? [String: Int] == ["input_tokens": 20, "cache_read_input_tokens": 100, "output_tokens": 8])
+    let ended = try #require(lines.last)
+    #expect(ended["total_cost_usd"] as? Double == 0.75)
+    #expect((ended["modelUsage"] as? [String: [String: Double]])?["m"] == ["inputTokens": 160, "cacheReadInputTokens": 100,
+                                                                         "cacheCreationInputTokens": 0, "outputTokens": 14, "costUSD": 0.75])
     #expect(asked["model"] as? String == "m")
     let answered = try #require(lines[5]["message"] as? [String: Any])
-    #expect(answered["usage"] == nil)
+    #expect(answered["usage"] as? [String: Int] == ["input_tokens": 140, "cache_read_input_tokens": 0, "output_tokens": 6])
     let result = try toolResult(lines[2])
     #expect(result["tool_use_id"] as? String == "call_1")
     #expect(result["is_error"] as? Bool == true)
@@ -565,4 +574,24 @@ private func logLines(_ rig: Rig) throws -> [ORLogLine] {
     #expect(ChatInput("/model ") == .model(nil))
     #expect(ChatInput("/models are fun") == .prompt("/models are fun"))
     #expect(ChatInput("  fix the bug ") == .prompt("fix the bug"))
+}
+
+/// After a turn, the key's limit and the account's credits, as OpenRouter
+/// gives them, on a line of their own.
+@Test(.timeLimit(.minutes(1))) func theKeysLimitAndCreditsFollowATurn() async throws {
+    let rig = try Rig(streams: [try reply("Hi.")], answers: [
+        "/api/v1/key": (200, #"{"data":{"limit":10,"limit_remaining":8.5,"limit_reset":"monthly","usage":1.5,"is_free_tier":false}}"#),
+        "/api/v1/credits": (200, #"{"data":{"total_credits":20,"total_usage":5}}"#),
+    ])
+    #expect(await rig.runner.turn("hi"))
+    await rig.runner.drain()
+    let lines = try objects(try rig.written().out)
+    let limits = try #require(lines.last)
+    #expect(limits["type"] as? String == "system")
+    #expect(limits["subtype"] as? String == "usage_limits")
+    let key = try #require(limits["key"] as? [String: Any])
+    #expect(key["limit"] as? Double == 10)
+    #expect(key["limit_remaining"] as? Double == 8.5)
+    #expect(key["limit_reset"] as? String == "monthly")
+    #expect(limits["credits"] as? [String: Double] == ["total_credits": 20, "total_usage": 5])
 }

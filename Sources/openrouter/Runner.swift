@@ -96,6 +96,16 @@ actor Conversation {
     var model: String { session.model }
     var hasKey: Bool { client.hasKey }
 
+    /// The key's limit and the account's credits, as OpenRouter says
+    /// them now; nil for whichever it would not say.
+    func usageLimits() async -> (key: ORKeyStatus?, credits: ORCredits?) {
+        let client = client
+        guard client.hasKey else { return (nil, nil) }
+        async let key = try? client.keyStatus()
+        async let credits = try? client.credits()
+        return await (key, credits)
+    }
+
     /// "low"/"medium"/"high" as OpenRouter takes them; the levels above
     /// high (Claude's xhigh, max) read as high; nothing for anything else.
     static func effort(_ value: String?) -> String? {
@@ -250,7 +260,7 @@ actor StreamJSONTurn {
     /// The message whose `message_start` has been written and whose
     /// `assistant` line has not.
     private var open: String?
-    private var usage: (prompt: Int, completion: Int)?
+    private var usage: ORUsage?
     /// The text of the last assistant message: what the result carries.
     private(set) var lastText = ""
 
@@ -272,8 +282,8 @@ actor StreamJSONTurn {
             guard partialMessages else { break }
             start(id)
             output.line(StreamJSON.textDelta(text))
-        case .usage(let prompt, let completion):
-            usage = (prompt, completion)
+        case .usage(let usage):
+            self.usage = usage
         case .assistant(let message, let id):
             start(id)
             output.line(StreamJSON.assistant(id: id, model: model, message: message, usage: usage))
@@ -299,6 +309,10 @@ actor HeadlessRunner {
     private let output: Output
     private var queue: [String] = []
     private var current: Task<Void, Never>?
+    /// What this run has used, by model: what each result line says.
+    private var spent: [String: ORUsage] = [:]
+    /// Asking OpenRouter for the key's limit and the credits, after a turn.
+    private var limits: Task<Void, Never>?
 
     /// - Parameters:
     ///   - streamOut: stream-json on stdout, rather than the reply's text.
@@ -357,6 +371,24 @@ actor HeadlessRunner {
         while let task = current {
             await task.value
         }
+        await limits?.value
+    }
+
+    private func spend(_ usage: ORUsage, on model: String) {
+        spent[model] = spent[model].map { $0.adding(usage) } ?? usage
+    }
+
+    /// Asks for the key's limit and the account's credits and prints them
+    /// when they come, without holding up the next turn. An answer still
+    /// coming from an earlier turn is not waited for.
+    private func reportLimits() {
+        guard streamOut else { return }
+        limits?.cancel()
+        limits = Task { [conversation, output] in
+            let (key, credits) = await conversation.usageLimits()
+            guard !Task.isCancelled, key != nil || credits != nil else { return }
+            output.line(StreamJSON.usageLimits(key: key, credits: credits))
+        }
     }
 
     /// Runs one turn and reports how it ended: a result line (stream-json)
@@ -372,16 +404,19 @@ actor HeadlessRunner {
             return false
         }
         // The turn's lines, when stream-json was asked for; else its text.
-        let lines = streamOut ? StreamJSONTurn(model: await conversation.model, partialMessages: partialMessages, output: output) : nil
+        let model = await conversation.model
+        let lines = streamOut ? StreamJSONTurn(model: model, partialMessages: partialMessages, output: output) : nil
+        defer { reportLimits() }
         do {
             try await conversation.run(text) { [output] event in
+                if case .usage(let usage) = event { await self.spend(usage, on: model) }
                 if let lines {
                     await lines.handle(event)
                 } else if case .delta(let piece, _) = event {
                     output.text(piece)
                 }
             }
-            if let lines { output.line(StreamJSON.result(.success, text: await lines.lastText, sessionID: id)) } else { output.text("\n") }
+            if let lines { output.line(StreamJSON.result(.success, text: await lines.lastText, sessionID: id, spent: spent)) } else { output.text("\n") }
             return true
         } catch {
             var message = error is CancellationError ? "Interrupted" : error.localizedDescription
@@ -391,7 +426,7 @@ actor HeadlessRunner {
             }
             // Out of rounds is the one failure Claude Code names apart.
             let kind: StreamJSON.ResultKind = if case ORAgentError.tooManyRounds = error { .errorMaxTurns } else { .errorDuringExecution }
-            if streamOut { output.line(StreamJSON.result(kind, text: message, sessionID: id)) } else { output.error(message) }
+            if streamOut { output.line(StreamJSON.result(kind, text: message, sessionID: id, spent: spent)) } else { output.error(message) }
             return false
         }
     }

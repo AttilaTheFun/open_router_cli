@@ -69,6 +69,15 @@ cut off at the model's output limit also ends the turn with an error
 result, which says which. `openrouter -p PROMPT` exits 1 when its one turn
 fails.
 
+What a run has used rides on its result lines as on Claude Code's:
+`total_cost_usd` (OpenRouter's cost, in dollars) and `modelUsage` (each
+model's tokens, those read from a cache apart), counted from the start
+of the process. The init line's `apiKeySource` says where the key came
+from (the variable's name, or `config`). After each turn a line of
+openrouter's own, `{"type":"system","subtype":"usage_limits",…}`, gives
+the key's limit and the account's credits as OpenRouter's `/key` and
+`/credits` say them, for a host to show how much is left.
+
 The model list (ids, names, prices per token, tool support) is kept in
 `~/.openrouter/models.json`: `openrouter models` fetches it afresh, and a
 headless run fetches it when what is there is more than a day old. It

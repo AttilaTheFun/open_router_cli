@@ -89,6 +89,7 @@ import TestSupport
     let expected: NSDictionary = [
         "model": "openai/gpt-5-nano",
         "stream": true,
+        "usage": ["include": true],
         "reasoning": ["effort": "low"],
         "messages": [
             ["role": "system", "content": "sys"],
@@ -104,7 +105,7 @@ import TestSupport
     #expect(body == expected)
     // With no tools and no effort, neither key is there.
     let plain = try JSONSerialization.jsonObject(with: try OpenRouterClient.body(ORChatRequest(model: "m", messages: []))) as? NSDictionary
-    #expect(plain == ["model": "m", "stream": true, "messages": [Any]()])
+    #expect(plain == ["model": "m", "stream": true, "usage": ["include": true], "messages": [Any]()])
 }
 
 /// A tool's schema reaches the API as it was written, whatever JSON it holds.
@@ -126,7 +127,7 @@ import TestSupport
 @Test func theRequestBodyIsTheSameBytesEachTime() throws {
     let request = ORChatRequest(model: "a/b", messages: [ORMessage(role: .user, content: "hi")], tools: [EchoTool()])
     let body = String(decoding: try OpenRouterClient.body(request), as: UTF8.self)
-    #expect(body == #"{"messages":[{"content":"hi","role":"user"}],"model":"a/b","stream":true,"tools":[{"function":{"description":"Echo the text back.","name":"echo","parameters":{"properties":{"text":{"type":"string"}},"required":["text"],"type":"object"}},"type":"function"}]}"#)
+    #expect(body == #"{"messages":[{"content":"hi","role":"user"}],"model":"a/b","stream":true,"tools":[{"function":{"description":"Echo the text back.","name":"echo","parameters":{"properties":{"text":{"type":"string"}},"required":["text"],"type":"object"}},"type":"function"}],"usage":{"include":true}}"#)
 }
 
 @Test func requestCarriesReasoningEffort() throws {
@@ -190,7 +191,7 @@ import TestSupport
 @Test func assistantLineCarriesTextAndToolUseBlocks() throws {
     let message = ORMessage(role: .assistant, content: "Let me look.",
                             toolCalls: [ORToolCall(id: "call_1", function: .init(name: "bash", arguments: "{\"command\":\"ls\"}"))])
-    let line = StreamJSON.assistant(id: "msg_1", model: "m", message: message, usage: (prompt: 10, completion: 2))
+    let line = StreamJSON.assistant(id: "msg_1", model: "m", message: message, usage: ORUsage(prompt: 10, completion: 2))
     let root = try #require(try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
     #expect(root["type"] as? String == "assistant")
     let body = try #require(root["message"] as? [String: Any])
