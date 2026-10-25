@@ -31,3 +31,14 @@ to one focused change, and say in it how the change was verified.
 - No warnings: CI passes `-warnings-as-errors` on the command line. The
   flag stays out of Package.swift (no `unsafeFlags`), since hosts embed
   the library.
+
+## The repository's icon
+
+`.github/OpenRouterCLI.icon` (Icon Composer) and its rendering, `.github/icon.png`,
+where Reviews and other tools look for a repository's icon. Rendered with
+`ictool` (in Xcode's Icon Composer.app, Contents/Executables):
+
+    ictool .github/OpenRouterCLI.icon --export-image --output-file .github/icon.png \
+        --platform iOS --rendition Default --width 512 --height 512 --scale 1
+
+No README in .github: GitHub would show it as the repository's.
