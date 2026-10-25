@@ -19,7 +19,11 @@ jobs:
   linux:
     # Linux on arm64, as a Visor session's container is: Swift's own image.
     runs-on: ubuntu-24.04-arm
-    container: swift:6.4.0-noble
+    # With an init that reaps orphans, as a container's own first process
+    # does in Visor's containers (Actions' runs `tail`, which reaps none).
+    container:
+      image: swift:6.4.0-noble
+      options: --init
     steps:
       - uses: actions/checkout@v4
       - name: Build

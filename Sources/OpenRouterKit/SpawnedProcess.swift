@@ -47,6 +47,12 @@ struct SpawnedProcess: Sendable {
             posix_spawn_file_actions_adddup2(actions, writing, 2)
             posix_spawn_file_actions_addclose(actions, writing)
             posix_spawn_file_actions_addchdir_np(actions, cwd)
+            #if !canImport(Darwin)
+            // Only what is set up here reaches the shell: nothing else this
+            // process has open (a pipe a host reads to its end, say, which
+            // a job the shell leaves running would otherwise hold open).
+            posix_spawn_file_actions_addclosefrom_np(actions, 3)
+            #endif
             return spawning(posix_spawnattr_init, posix_spawnattr_destroy) { attributes in
                 // A group of its own, so a signal to the group reaches what
                 // the shell starts; signals as they are by default, none
@@ -60,7 +66,14 @@ struct SpawnedProcess: Sendable {
                 posix_spawnattr_setsigdefault(attributes, &defaults)
                 posix_spawnattr_setsigmask(attributes, &unblocked)
                 posix_spawnattr_setpgroup(attributes, 0)
-                posix_spawnattr_setflags(attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK))
+                var flags = POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK
+                #if canImport(Darwin)
+                // Only what is set up here reaches the shell (as Foundation's
+                // Process does it): Apple's systems close every other
+                // descriptor at the exec, Linux's file action above.
+                flags |= POSIX_SPAWN_CLOEXEC_DEFAULT
+                #endif
+                posix_spawnattr_setflags(attributes, Int16(flags))
                 return posix_spawn(&pid, path, actions, attributes, argv, envp)
             }
         }
