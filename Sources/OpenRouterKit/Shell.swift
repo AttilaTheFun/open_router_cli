@@ -42,7 +42,7 @@ enum Shell {
     private enum Event: Sendable {
         case output(Data)
         case endOfOutput
-        case exited
+        case exited(SpawnedProcess.Ending)
         case stop(ShellOutcome.Stop)
         /// `patience` has passed since the command was asked to end.
         case insist
@@ -50,7 +50,11 @@ enum Shell {
         case graceOver
     }
 
-    /// Runs `command` with `zsh -lc` in `cwd`, with no input and in
+    /// The shell commands run in: zsh where there is one (macOS's own),
+    /// else bash (a Linux's), else sh.
+    static let shell = ["/bin/zsh", "/bin/bash", "/bin/sh"].first { FileManager.default.isExecutableFile(atPath: $0) } ?? "/bin/sh"
+
+    /// Runs `command` with `<shell> -lc` in `cwd`, with no input and in
     /// `environment` (this process's own when nil), and returns when the
     /// shell has exited and its output has been read. Past `timeout`, or
     /// when the calling task is cancelled, the command is stopped: the
@@ -58,58 +62,52 @@ enum Shell {
     static func run(_ command: String, cwd: String, environment: [String: String]?, timeout: Duration, keep: Int) async throws -> ShellOutcome {
         // A task already cancelled starts nothing.
         try Task.checkCancellation()
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = ["-lc", command]
-        process.currentDirectoryURL = URL(fileURLWithPath: cwd)
-        if let environment { process.environment = environment }
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        process.standardInput = FileHandle.nullDevice
+        let process: SpawnedProcess
+        do {
+            process = try SpawnedProcess.spawn(shell, ["-lc", command], cwd: cwd, environment: environment ?? ProcessInfo.processInfo.environment)
+        } catch {
+            throw ToolFailure(message: "could not run: \(error)")
+        }
 
         let (events, feed) = AsyncStream.makeStream(of: Event.self)
-        let reading = pipe.fileHandleForReading
-        // Called when the pipe has something: `availableData` does not
-        // block here, and is empty at the end of the output.
-        reading.readabilityHandler = { handle in
-            let data = handle.availableData
-            if data.isEmpty {
-                handle.readabilityHandler = nil
-                feed.yield(.endOfOutput)
-            } else {
-                feed.yield(.output(data))
+        // The output and the end are waited for on threads of their own:
+        // both block, and neither may hold up the tasks' shared threads.
+        let output = process.output
+        Thread {
+            var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+            while true {
+                let count = buffer.withUnsafeMutableBytes { read(output, $0.baseAddress, $0.count) }
+                if count > 0 {
+                    feed.yield(.output(Data(buffer[0..<count])))
+                } else if count == -1 && errno == EINTR {
+                    continue
+                } else {
+                    break
+                }
             }
-        }
-        process.terminationHandler = { _ in feed.yield(.exited) }
-        do {
-            try process.run()
-        } catch {
-            reading.readabilityHandler = nil
-            throw ToolFailure(message: "could not run: \(error.localizedDescription)")
-        }
-        // Foundation starts a process as the leader of a process group of
-        // its own; a signal to the group reaches what the shell started
-        // as well. Checked rather than assumed: the group is signalled
-        // only if the shell was seen to lead it. (The usual limit of
-        // signalling by number holds: once the shell and everything it
-        // started are gone, the number is the system's to give again.)
-        let pid = process.processIdentifier
+            close(output)
+            feed.yield(.endOfOutput)
+        }.start()
+        Thread { feed.yield(.exited(process.wait())) }.start()
+        // The shell leads a process group of its own (SpawnedProcess); a
+        // signal to the group reaches what it started as well. Checked
+        // rather than assumed: the group is signalled only if the shell
+        // was seen to lead it. (The usual limit of signalling by number
+        // holds: once the shell and everything it started are gone, the
+        // number is the system's to give again.)
+        let pid = process.pid
         let target = Target(pid: pid, isGroup: getpgid(pid) == pid)
 
         // Followed in a task of its own, which the caller's cancellation
         // does not cancel: a cancelled caller must stop the command and
         // still wait for it to be gone, not walk away from it.
         let following = Task { await follow(events, feed: feed, target: target, timeout: timeout, keep: keep) }
-        var outcome = await withTaskCancellationHandler {
+        let outcome = await withTaskCancellationHandler {
             await following.value
         } onCancel: {
             feed.yield(.stop(.cancelled))
         }
         feed.finish()
-        reading.readabilityHandler = nil
-        outcome.status = process.terminationStatus
-        outcome.signalled = process.terminationReason == .uncaughtSignal
         return outcome
     }
 
@@ -142,8 +140,10 @@ enum Shell {
                 case .endOfOutput:
                     outputEnded = true
                     if exited { break loop }
-                case .exited:
+                case .exited(let ending):
                     exited = true
+                    outcome.status = ending.status
+                    outcome.signalled = ending.signalled
                     // A stopped command's stragglers (what ignored the
                     // request to end, or outlived the shell) go with it.
                     if outcome.stopped != nil, target.isGroup { target.signal(SIGKILL) }

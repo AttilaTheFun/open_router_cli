@@ -7,7 +7,7 @@
 import Foundation
 import OpenRouterKit
 
-let version = "0.4.0"
+let version = "0.5.0"
 
 let output = Output.standard
 let options: Options
@@ -58,7 +58,7 @@ func readSecret(prompt: String) -> String {
     var term = termios()
     tcgetattr(STDIN_FILENO, &term)
     var quiet = term
-    quiet.c_lflag &= ~UInt(ECHO)
+    quiet.c_lflag &= ~tcflag_t(ECHO)
     tcsetattr(STDIN_FILENO, TCSANOW, &quiet)
     defer { tcsetattr(STDIN_FILENO, TCSANOW, &term); output.text("\n") }
     return readLine() ?? ""
@@ -191,7 +191,7 @@ func headless() async -> Int32 {
                                 partialMessages: options.flags.contains("include-partial-messages"), output: output)
     if streamIn {
         do {
-            for try await line in FileHandle.standardInput.bytes.lineFeedLines { await runner.take(line: line) }
+            for try await line in FileHandle.standardInput.arrivingLines { await runner.take(line: line) }
         } catch {
             output.error("stdin: \(error.localizedDescription)")
         }

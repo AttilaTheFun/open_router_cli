@@ -235,7 +235,7 @@ public struct ListDirectoryTool: ORTool {
         var lines: [String] = []
         for name in names.sorted() {
             var isDirectory: ObjCBool = false
-            FileManager.default.fileExists(atPath: (full as NSString).appendingPathComponent(name), isDirectory: &isDirectory)
+            _ = FileManager.default.fileExists(atPath: (full as NSString).appendingPathComponent(name), isDirectory: &isDirectory)
             lines.append(isDirectory.boolValue ? name + "/" : name)
         }
         return CodingTools.capped(lines.isEmpty ? "(empty)" : lines.joined(separator: "\n"))

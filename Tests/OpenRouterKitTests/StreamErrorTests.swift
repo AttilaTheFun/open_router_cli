@@ -2,6 +2,9 @@
 // an answer: the client's stream throws, and so does the agent's turn.
 
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import Testing
 @testable import OpenRouterKit
 import TestSupport
@@ -91,12 +94,31 @@ private let hello = ["choices": [["delta": ["content": "Hello"]]]]
     await #expect(throws: CancellationError.self) { _ = try await asking.value }
 }
 
+/// Answers with a response that is not HTTP's, as a file's is.
+final class NotHTTPProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let response = URLResponse(url: request.url!, mimeType: "application/json", expectedContentLength: 11, textEncodingName: nil)
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(#"{"data":[]}"#.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
 /// A response that is not HTTP's has no status to call a success.
 @Test func aResponseThatIsNotHTTPIsRefused() async throws {
-    let file = try scratch().appendingPathComponent("models.json")
-    try Data(#"{"data":[]}"#.utf8).write(to: file)
-    let whole = await #expect(throws: URLError.self) { _ = try await URLSessionTransport().data(for: URLRequest(url: file)) }
-    let streamed = await #expect(throws: URLError.self) { _ = try await URLSessionTransport().lines(for: URLRequest(url: file)) }
+    let transport = URLSessionTransport {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [NotHTTPProtocol.self]
+        return configuration
+    }
+    let request = URLRequest(url: URL(string: "https://openrouter.test/api/v1/models")!)
+    let whole = await #expect(throws: URLError.self) { _ = try await transport.data(for: request) }
+    let streamed = await #expect(throws: URLError.self) { _ = try await transport.lines(for: request) }
     #expect(whole?.code == .badServerResponse)
     #expect(streamed?.code == .badServerResponse)
 }

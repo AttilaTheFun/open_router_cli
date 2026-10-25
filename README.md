@@ -9,9 +9,10 @@ coding-agent CLI.
   write_file, edit_file, list_directory), sessions on disk
   (`ORSessionStore`), the config (`ORConfig`), and Claude Code's
   stream-json protocol (`StreamJSON`). A host can embed it as a Swift
-  package, without the CLI. macOS 15 or later only: the bash tool runs a
-  process, and the config and the sessions live in the user's home
-  folder.
+  package, without the CLI. macOS 15 or later, or Linux (a Visor
+  session's container, say): the bash tool runs a process, and the config
+  and the sessions live in the user's home folder, which iOS has neither
+  of.
 - **openrouter** — the CLI: a coding agent in the terminal, and a headless
   mode that speaks Claude Code's stream-json protocol, so anything that
   drives `claude -p` drives `openrouter -p` the same way.

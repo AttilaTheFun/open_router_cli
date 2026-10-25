@@ -3,9 +3,9 @@ import PackageDescription
 
 let package = Package(
     name: "open_router_cli",
-    // macOS only: the bash tool runs a process, and the config and the
-    // sessions live in the user's home folder; the iOS SDK has neither
-    // `Process` nor `homeDirectoryForCurrentUser`. macOS 15 for `Mutex`.
+    // macOS and Linux: the bash tool runs a process, and the config and
+    // the sessions live in the user's home folder; the iOS SDK has neither
+    // `posix_spawn` nor `homeDirectoryForCurrentUser`. macOS 15 for `Mutex`.
     platforms: [.macOS(.v15)],
     products: [
         // The library: the API client, the agent loop, the coding tools,
@@ -16,8 +16,13 @@ let package = Package(
         // Visor drives.
         .executable(name: "openrouter", targets: ["openrouter"]),
     ],
+    dependencies: [
+        // File descriptors and their errors on Linux as on macOS (the
+        // system's own `System` is Apple's alone).
+        .package(url: "https://github.com/apple/swift-system", from: "1.4.0"),
+    ],
     targets: [
-        .target(name: "OpenRouterKit"),
+        .target(name: "OpenRouterKit", dependencies: [.product(name: "SystemPackage", package: "swift-system")]),
         .executableTarget(name: "openrouter", dependencies: ["OpenRouterKit"]),
         // What both test targets use: the mock transport, so no test
         // reaches the network.

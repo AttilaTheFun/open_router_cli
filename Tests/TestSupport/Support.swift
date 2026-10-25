@@ -2,6 +2,9 @@
 // tool, and somewhere to keep the events a turn reports.
 
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import OpenRouterKit
 
 /// A transport that answers from canned bodies and SSE lines, so the

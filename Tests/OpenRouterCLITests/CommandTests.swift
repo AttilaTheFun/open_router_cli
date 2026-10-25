@@ -20,11 +20,14 @@ private struct Run {
 /// A class of this test bundle, for finding the bundle by.
 private final class InThisBundle {}
 
-/// The executable, beside the test bundle that was built with it.
+/// The executable, beside the test bundle that was built with it (an
+/// .xctest bundle's folder), or in it (the folder the bundle is when the
+/// tests are an executable of their own, as on Linux).
 private func executable() throws -> URL {
-    let built = Bundle(for: InThisBundle.self).bundleURL.deletingLastPathComponent().appendingPathComponent("openrouter")
-    try #require(FileManager.default.isExecutableFile(atPath: built.path), "no openrouter at \(built.path)")
-    return built
+    let bundle = Bundle(for: InThisBundle.self).bundleURL
+    let places = [bundle.deletingLastPathComponent(), bundle].map { $0.appendingPathComponent("openrouter") }
+    let built = places.first { FileManager.default.isExecutableFile(atPath: $0.path) }
+    return try #require(built, "no openrouter at \(places.map(\.path))")
 }
 
 /// Runs `openrouter` with these arguments and this text on stdin, in a
