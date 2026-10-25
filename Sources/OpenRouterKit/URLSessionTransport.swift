@@ -1,27 +1,36 @@
 // The real transport: URLSession, with the streamed body read as lines
-// (ended by a line feed only: see Lines.swift).
+// (ended by a line feed only: see Lines.swift) as they arrive.
 
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 public struct URLSessionTransport: ORTransport {
-    private let session = URLSession.shared
+    /// What each request's session is made with (a test puts its own
+    /// protocol in front of the network).
+    private let configuration: @Sendable () -> URLSessionConfiguration
 
-    public init() {}
+    public init(configuration: @escaping @Sendable () -> URLSessionConfiguration = { .default }) {
+        self.configuration = configuration
+    }
 
     public func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        let (data, response) = try await session.data(for: request)
-        return (data, try Self.http(response))
+        let (lines, response) = try await body(for: request)
+        var data = Data()
+        for try await piece in lines { data.append(piece) }
+        return (data, response)
     }
 
     public func lines(for request: URLRequest) async throws -> (any AsyncSequence<String, any Error> & Sendable, HTTPURLResponse) {
-        let (bytes, response) = try await session.bytes(for: request)
-        return (bytes.lineFeedLines, try Self.http(response))
+        let (pieces, response) = try await body(for: request)
+        return (DataPieceBytes(base: pieces).lineFeedLines, response)
     }
 
-    /// The response as HTTP's, which the API's always is; anything else is
-    /// not an answer from it, and has no status to call a success.
-    private static func http(_ response: URLResponse) throws -> HTTPURLResponse {
-        guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
-        return http
+    /// The response, and the body's pieces as they come.
+    private func body(for request: URLRequest) async throws -> (AsyncThrowingStream<Data, any Error>, HTTPURLResponse) {
+        let task = StreamingDataTask()
+        let response = try await task.start(request, configuration: configuration())
+        return (task.body, response)
     }
 }

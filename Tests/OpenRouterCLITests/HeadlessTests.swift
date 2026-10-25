@@ -3,6 +3,9 @@
 // the session on disk.
 
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import Testing
 import OpenRouterKit
 import TestSupport

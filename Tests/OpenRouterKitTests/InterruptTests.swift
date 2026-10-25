@@ -3,6 +3,9 @@
 // left so that the next request is accepted — every tool call answered.
 
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import Testing
 @testable import OpenRouterKit
 import TestSupport

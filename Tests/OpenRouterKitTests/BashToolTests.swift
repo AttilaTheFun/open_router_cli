@@ -23,7 +23,15 @@ private func json(_ object: [String: Any]) throws -> String {
 }
 
 /// Whether a process with this id exists.
-private func isAlive(_ pid: pid_t) -> Bool { kill(pid, 0) == 0 }
+/// Whether a process is still running: there, and not a zombie (one that
+/// has ended but that nothing has reaped, as an orphan in a container
+/// whose first process reaps nothing is; Linux says so in /proc).
+private func isAlive(_ pid: pid_t) -> Bool {
+    guard kill(pid, 0) == 0 else { return false }
+    guard let stat = try? String(contentsOfFile: "/proc/\(pid)/stat", encoding: .utf8),
+          let end = stat.range(of: ") ", options: .backwards) else { return true }
+    return stat[end.upperBound...].first != "Z"
+}
 
 /// The process id a command printed as its first line.
 private func firstPID(in output: String) throws -> pid_t {
@@ -147,4 +155,16 @@ private func isGone(_ pid: pid_t) async throws -> Bool {
     let environment = ProcessInfo.processInfo.environment.merging(["ZDOTDIR": try scratch().path, "OPENROUTER_TEST_VALUE": "given"]) { $1 }
     let ran = try await BashTool(cwd: cwd, environment: environment).call(arguments: try json(["command": "echo $OPENROUTER_TEST_VALUE"]))
     #expect(ran == "given\n\n[exit 0]")
+}
+
+/// The shell is given only its own input and output: nothing else this
+/// process has open, which a job it left running would otherwise hold (a
+/// pipe a host reads to its end waited for the job: 30 s on CI).
+@Test(.timeLimit(.minutes(1))) func bashGetsNoneOfThisProcesssDescriptors() async throws {
+    var ends: [Int32] = [0, 0]
+    #expect(pipe(&ends) == 0)
+    defer { close(ends[0]); close(ends[1]) }
+    let ran = try await bash(in: try scratch().path).call(arguments: try json(["command": "ls /dev/fd"]))
+    let open = Set(ran.split(separator: "\n").compactMap { Int32($0) })
+    #expect(!open.contains(ends[0]) && !open.contains(ends[1]), "the shell has \(ends) of this process: \(open.sorted())")
 }

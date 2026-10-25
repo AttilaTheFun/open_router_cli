@@ -2,6 +2,9 @@
 // `lines` also splits at are ones JSON carries raw inside a string.
 
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import Testing
 @testable import OpenRouterKit
 import TestSupport
@@ -24,11 +27,9 @@ private func lines(_ text: String) async throws -> [String] {
     // A line separator, a paragraph separator, a next-line, a vertical tab
     // and a form feed: all inside the line they are in.
     let odd = "a\u{2028}b\u{2029}c\u{85}d\u{0B}e\u{0C}f"
+    // (Which Apple's Foundation's own `lines` cuts into six; Linux's has
+    // no `lines` on bytes at all.)
     #expect(try await lines(odd + "\nnext\n") == [odd, "next"])
-    // Which Foundation's own lines would cut into six.
-    var cut = 0
-    for try await _ in bytes(odd + "\n").lines { cut += 1 }
-    #expect(cut == 6)
 }
 
 @Test func linesKeepTheirShape() async throws {

@@ -10,7 +10,7 @@
 // given.
 
 import Foundation
-import System
+import SystemPackage
 
 public struct ORConfig: Codable, Sendable, Equatable {
     public var apiKey: String?
@@ -76,8 +76,14 @@ public struct ORConfig: Codable, Sendable, Equatable {
             throw POSIXError(POSIXErrorCode(rawValue: errno.rawValue) ?? .EIO, userInfo: [NSFilePathErrorKey: fresh.path])
         }
         do {
-            // The new file's own permissions, not those of the one it replaces.
-            _ = try FileManager.default.replaceItemAt(Self.file(environment: environment), withItemAt: fresh, options: .usingNewMetadataOnly)
+            let file = Self.file(environment: environment)
+            if FileManager.default.fileExists(atPath: file.path) {
+                // The new file's own permissions, not those of the one it replaces.
+                _ = try FileManager.default.replaceItemAt(file, withItemAt: fresh, options: .usingNewMetadataOnly)
+            } else {
+                // Nothing to replace (which Linux's Foundation will not do).
+                try FileManager.default.moveItem(at: fresh, to: file)
+            }
         } catch {
             try? FileManager.default.removeItem(at: fresh)
             throw error

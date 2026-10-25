@@ -3,6 +3,9 @@
 // network.
 
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// What actually moves the bytes. The real one is URLSession; a test
 /// gives its own.
