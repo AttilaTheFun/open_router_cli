@@ -164,7 +164,11 @@ private func isGone(_ pid: pid_t) async throws -> Bool {
     var ends: [Int32] = [0, 0]
     #expect(pipe(&ends) == 0)
     defer { close(ends[0]); close(ends[1]) }
-    let ran = try await bash(in: try scratch().path).call(arguments: try json(["command": "ls /dev/fd"]))
+    // Each end is tried by its number with the shell's own redirection,
+    // which opens nothing: `ls /dev/fd` lists the descriptor ls opens to read
+    // it, whose number a pipe made while other tests close theirs can share.
+    let command = ends.map { "{ : <&\($0); } 2>/dev/null && echo \($0)" }.joined(separator: "; ")
+    let ran = try await bash(in: try scratch().path).call(arguments: try json(["command": command]))
     let open = Set(ran.split(separator: "\n").compactMap { Int32($0) })
     #expect(!open.contains(ends[0]) && !open.contains(ends[1]), "the shell has \(ends) of this process: \(open.sorted())")
 }
